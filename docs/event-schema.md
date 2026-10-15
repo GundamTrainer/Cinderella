@@ -29,6 +29,8 @@ Supported event types:
 - speech.final_transcript
 - vision.person_detected
 - vision.action_detected
+- vision.objects_detected
+- vision.expression_cues_detected
 - planner.action_proposed
 - safety.action_approved
 - safety.action_rejected
@@ -53,6 +55,10 @@ These values are distinct so the runtime can correlate related events without lo
 ## Unknown event types
 
 Unknown event types are rejected with a specific error. The runtime does not silently accept unrecognized event names because that would bypass the schema contract and make debugging unreliable.
+
+The opt-in local AI runtime uses `speech.final_transcript`, `vision.objects_detected`,
+`vision.action_detected`, and `vision.expression_cues_detected` for transient inference results.
+These events are not persisted by the runtime.
 
 ## Serialization behavior
 

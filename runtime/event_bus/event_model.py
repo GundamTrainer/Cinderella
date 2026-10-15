@@ -26,6 +26,8 @@ class EventType(StrEnum):
     SPEECH_FINAL_TRANSCRIPT = "speech.final_transcript"
     VISION_PERSON_DETECTED = "vision.person_detected"
     VISION_ACTION_DETECTED = "vision.action_detected"
+    VISION_OBJECTS_DETECTED = "vision.objects_detected"
+    VISION_EXPRESSION_CUES_DETECTED = "vision.expression_cues_detected"
     PLANNER_ACTION_PROPOSED = "planner.action_proposed"
     SAFETY_ACTION_APPROVED = "safety.action_approved"
     SAFETY_ACTION_REJECTED = "safety.action_rejected"

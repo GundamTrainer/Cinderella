@@ -11,8 +11,12 @@ dev = [
   "ruff>=0.6.0",
 ]
 hardware = [
-  "opencv-python>=4.9",
+  "opencv-contrib-python>=4.9",
   "sounddevice>=0.4.6",
+]
+ai = [
+  "faster-whisper>=1.2.1",
+  "mediapipe>=0.10.31",
 ]
 
 [tool.setuptools]

@@ -1,5 +1,7 @@
 # Python environment
 .venv/
+.venv314/
+.venv-runtime/
 __pycache__/
 *.py[cod]
 *.pyd

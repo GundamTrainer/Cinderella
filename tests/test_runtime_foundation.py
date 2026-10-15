@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from runtime.ai_pipeline import (
+    LocalSpeechRecognizer,
+    OllamaChat,
+    PerceptionSnapshot,
+    facial_expression_cues,
+    raised_arm_cues,
+)
 from runtime.component import Component, ComponentState, InvalidStateTransitionError
 from runtime.config import ConfigurationError, RuntimeSettings, load_runtime_settings
 from runtime.event_bus import Event, EventBus, EventBusClosedError, EventBusFullError, EventType
@@ -261,8 +270,6 @@ def test_live_preview_requires_optional_hardware_dependencies(monkeypatch: pytes
 
 
 def test_live_preview_stops_and_releases_devices_on_quit(monkeypatch: pytest.MonkeyPatch) -> None:
-    from types import SimpleNamespace
-
     from runtime import laptop_io
 
     capture_state = {"released": False}
@@ -314,3 +321,74 @@ def test_live_preview_stops_and_releases_devices_on_quit(monkeypatch: pytest.Mon
 
     assert capture_state["released"] is True
     assert stream_state == {"started": True, "stopped": True, "closed": True}
+
+
+def test_pose_analysis_only_reports_observable_raised_arm_cues() -> None:
+    landmarks = [SimpleNamespace(y=0.5, visibility=1.0) for _ in range(17)]
+    landmarks[11].y = 0.4
+    landmarks[12].y = 0.4
+    landmarks[15].y = 0.2
+    landmarks[16].y = 0.3
+
+    assert raised_arm_cues(landmarks) == ("both arms raised",)
+
+    landmarks[16].y = 0.6
+    assert raised_arm_cues(landmarks) == ("left arm raised",)
+
+
+def test_face_analysis_reports_movement_not_emotional_state() -> None:
+    categories = [
+        SimpleNamespace(category_name="mouthSmileLeft", score=0.8),
+        SimpleNamespace(category_name="mouthSmileRight", score=0.7),
+        SimpleNamespace(category_name="jawOpen", score=0.6),
+    ]
+
+    cues = facial_expression_cues(categories)
+
+    assert cues == ("smile-like facial movement", "open-mouth movement")
+    assert "happy" not in cues
+
+
+def test_speech_recognizer_resamples_to_whisper_sample_rate() -> None:
+    class FakeModel:
+        received_length = 0
+
+        def transcribe(self, audio: object, **kwargs: object) -> tuple[list[object], object]:
+            self.received_length = len(audio)  # type: ignore[arg-type]
+            return [SimpleNamespace(text="한국어 인식")], SimpleNamespace(language="ko")
+
+    recognizer = object.__new__(LocalSpeechRecognizer)
+    fake_model = FakeModel()
+    recognizer._model = fake_model
+
+    result = recognizer.transcribe([0.0] * 48_000, sample_rate=48_000)
+
+    assert result == "한국어 인식"
+    assert fake_model.received_length == 16_000
+
+
+def test_local_chat_sends_only_transcript_and_textual_perception(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = OllamaChat()
+    sent_payloads: list[dict[str, object]] = []
+
+    def fake_post(endpoint: str, payload: dict[str, object]) -> dict[str, object]:
+        assert endpoint == "/api/chat"
+        sent_payloads.append(payload)
+        return {"message": {"content": "주변에 의자가 보입니다."}}
+
+    monkeypatch.setattr(chat, "_post", fake_post)
+    reply = chat.reply(
+        "안녕하세요",
+        PerceptionSnapshot(
+            objects=("chair",),
+            action_cues=("left arm raised",),
+            expression_cues=("smile-like facial movement",),
+        ),
+    )
+
+    serialized = str(sent_payloads[0])
+    assert reply == "주변에 의자가 보입니다."
+    assert "안녕하세요" in serialized
+    assert "chair" in serialized
+    assert "images" not in serialized
+    assert "happy" not in serialized
