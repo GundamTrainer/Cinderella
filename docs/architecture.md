@@ -32,7 +32,7 @@ An opt-in command-line preview can display a camera feed and a microphone level 
 
 ### Local AI inference
 
-The opt-in AI mode uses faster-whisper (CPU/int8) for multilingual transcription and MediaPipe Tasks for object detection, pose landmarks, and face blendshape cues. Object, pose, expression, and transcript outputs are published as ephemeral events. A loopback-only Ollama client uses a small local chat model; it receives transcript text and abstract visual cues, never raw media. First-use model downloads are cached under the user's home cache directory and are not repository assets.
+The opt-in AI mode uses faster-whisper (CPU/int8) for Korean transcription and MediaPipe Tasks for EfficientDet Lite2 object detection, pose landmarks, and temporally smoothed face blendshape movement cues. Regular conversation uses a small local Ollama text model. Explicit visual questions additionally use Qwen2.5-VL with a temporary JPEG of the current frame over loopback; images are not added to retained chat history. The installed Windows Korean SAPI voice speaks replies offline. A scheduler can initiate short conversations after a quiet interval or stable visual cue; it does not claim to infer emotion. Basic barge-in detection listens for sustained microphone audio above an estimated speaker-echo level. First-use model downloads are cached locally and are not repository assets.
 
 ### Orchestrator
 
@@ -41,8 +41,7 @@ The orchestrator is responsible for initializing components, starting them, cons
 ## Planned functionality
 
 The following areas are intentionally not implemented yet and are explicitly called out as future work:
-- speech synthesis
-- generalized action recognition and reliable emotional-state inference
+- robust generalized action recognition and reliable emotional-state inference
 - hardware adapters and embedded device drivers
 - user-specific voice or character profiles
 - external cloud services or internet-connected features

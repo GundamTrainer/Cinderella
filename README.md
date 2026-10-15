@@ -12,11 +12,11 @@ Implemented:
 - deterministic simulation components for audio, vision, and hardware
 - runtime orchestrator with cleanup on partial initialization failure
 - optional laptop camera/microphone preview
-- opt-in local Whisper speech transcription, MediaPipe object/pose/face-cue inference, and Ollama chat
+- opt-in local Whisper transcription, MediaPipe object/pose/face-movement inference, local image-aware Ollama conversation, and offline Korean speech output
+- quiet-pause and stable visual-cue conversation prompts, with basic speech-interruption detection
 - pytest coverage for the runtime foundation
 
 Not implemented yet:
-- speech synthesis
 - robust general action recognition beyond simple pose cues
 - emotion diagnosis (appearance and voice cues cannot establish a person's true emotional state)
 - hardware device drivers
@@ -49,10 +49,11 @@ List devices and run the lightweight preview:
 .\.venv314\Scripts\python.exe main.py --preview
 ```
 
-Install Ollama and download a small Korean-capable model:
+Install Ollama and download the local vision-and-chat model:
 
 ```bash
 ollama pull qwen2.5:1.5b
+ollama pull qwen2.5vl:3b
 ```
 
 Start local speech transcription, image/object/pose/facial-movement cues, and conversation:
@@ -61,8 +62,8 @@ Start local speech transcription, image/object/pose/facial-movement cues, and co
 .\.venv314\Scripts\python.exe main.py --live
 ```
 
-The first run downloads the Whisper `small` model and MediaPipe task assets into the current user's cache. These downloads require internet once; inference runs locally afterward. Use `--speech-model base` for a smaller/faster but less accurate speech model. Press Q/Esc to stop.
+The first run downloads the Whisper `small` model and MediaPipe task assets into the current user's cache. Ollama downloads its model separately. These downloads require internet once; inference runs locally afterward. Use `--speech-model base` for a smaller/faster but less accurate speech model. Press Q/Esc to stop.
 
-Live processing is opt-in. Raw audio and camera frames are kept in memory only and are neither saved nor sent to Ollama; only recognized text and a short abstract perception summary are sent to the local Ollama service over loopback. Facial output is described as visible movement cues and is not a reliable diagnosis of emotion, intent, identity, or personality. Action recognition is currently limited to simple pose rules such as raised arms.
+Live processing is opt-in. Raw audio and camera frames are not saved. A temporary JPEG thumbnail (maximum 448 pixels on its longest side) of the current frame is sent over loopback to the local vision model only when a visual question is recognized; older images are not retained in chat history. Regular conversation uses the smaller text model, and proactive prompts use detected text cues. Visual answers can be slow on CPU-only systems. Transcripts and movement cues are sent only to the local Ollama service. Windows' installed Korean text-to-speech voice provides offline speech output. Proactive prompts are rate-limited to at least one minute apart and may be skipped if there is nothing useful to say. Headphones help avoid speaker echo and improve interruption detection. Facial output describes visible movement only, not emotion, intent, identity, or personality. Object detection currently uses a general-purpose COCO detector, while action recognition remains limited to simple pose rules.
 
 Python 3.14 is recommended for the optional local inference stack. The original Python 3.15 environment may not have compatible wheels for all inference packages.

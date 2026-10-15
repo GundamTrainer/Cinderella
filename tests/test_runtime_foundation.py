@@ -8,6 +8,10 @@ from runtime.ai_pipeline import (
     LocalSpeechRecognizer,
     OllamaChat,
     PerceptionSnapshot,
+    ProactiveConversationScheduler,
+    _asks_about_visual_context,
+    _smooth_blendshapes,
+    _visual_chat_frame,
     facial_expression_cues,
     raised_arm_cues,
 )
@@ -392,3 +396,75 @@ def test_local_chat_sends_only_transcript_and_textual_perception(monkeypatch: py
     assert "chair" in serialized
     assert "images" not in serialized
     assert "happy" not in serialized
+
+
+def test_local_chat_uses_current_image_without_retaining_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = OllamaChat()
+    sent_payloads: list[dict[str, object]] = []
+
+    def fake_post(endpoint: str, payload: dict[str, object]) -> dict[str, object]:
+        sent_payloads.append(payload)
+        return {"message": {"content": "책상 위에 컵이 보입니다."}}
+
+    monkeypatch.setattr(chat, "_post", fake_post)
+    chat.reply("지금 뭐가 보여?", PerceptionSnapshot(), image_jpeg=b"jpeg-frame")
+
+    messages = sent_payloads[0]["messages"]
+    assert isinstance(messages, list)
+    assert "anBlZy1mcmFtZQ==" in str(messages[-1])
+    assert sent_payloads[0]["model"] == chat.vision_model
+    assert "images" not in str(chat._history)
+
+
+def test_visual_context_is_only_requested_for_visual_questions() -> None:
+    assert _asks_about_visual_context("지금 뭐가 보여?")
+    assert _asks_about_visual_context("저 물건은 무슨 색이야?")
+    assert not _asks_about_visual_context("오늘 날씨가 어때?")
+
+
+def test_visual_chat_frame_is_resized_with_aspect_ratio_preserved() -> None:
+    class FakeCv2:
+        INTER_AREA = 1
+
+        @staticmethod
+        def resize(frame: object, size: tuple[int, int], interpolation: int) -> tuple[object, ...]:
+            return frame, size, interpolation
+
+    frame = SimpleNamespace(shape=(720, 1280, 3))
+
+    assert _visual_chat_frame(FakeCv2(), frame) == (frame, (448, 252), FakeCv2.INTER_AREA)
+
+
+def test_proactive_scheduler_waits_and_rate_limits_visual_cues() -> None:
+    import random
+
+    scheduler = ProactiveConversationScheduler(
+        minimum_idle_seconds=60,
+        maximum_idle_seconds=60,
+        stable_cue_seconds=4,
+        rng=random.Random(1),
+        now=0,
+    )
+    scene = PerceptionSnapshot(objects=("cup",))
+
+    assert scheduler.next_reason(scene, now=0) is None
+    assert scheduler.next_reason(scene, now=59) is None
+    assert scheduler.next_reason(scene, now=60) == "visual_change"
+
+    scheduler.mark_prompted(scene, now=60)
+    assert scheduler.next_reason(scene, now=119) is None
+    assert scheduler.next_reason(scene, now=120) == "quiet_pause"
+
+
+def test_blendshape_smoothing_reduces_single_frame_spikes() -> None:
+    first = _smooth_blendshapes(
+        {},
+        [SimpleNamespace(category_name="mouthSmileLeft", score=1.0)],
+    )
+    second = _smooth_blendshapes(
+        first,
+        [SimpleNamespace(category_name="mouthSmileLeft", score=0.0)],
+    )
+
+    assert first["mouthSmileLeft"] == pytest.approx(0.45)
+    assert second["mouthSmileLeft"] == pytest.approx(0.2475)

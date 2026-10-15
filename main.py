@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 
-from runtime.ai_pipeline import LocalInferenceError
+from runtime.ai_pipeline import CHAT_MODEL, VISION_CHAT_MODEL, LocalInferenceError
 from runtime.config import load_runtime_settings
 from runtime.event_bus import EventBus
 from runtime.laptop_io import LaptopDeviceError, list_audio_inputs, list_cameras, run_live_preview
@@ -35,12 +35,21 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         help="Microphone input index (default from config or Windows default input).",
     )
-    parser.add_argument("--chat-model", default="qwen2.5:1.5b", help="Local Ollama model name.")
+    parser.add_argument(
+        "--chat-model",
+        default=CHAT_MODEL,
+        help="Local Ollama text-chat model name.",
+    )
+    parser.add_argument(
+        "--vision-model",
+        default=VISION_CHAT_MODEL,
+        help="Local Ollama vision model used for visual questions.",
+    )
     parser.add_argument(
         "--speech-model",
         default="small",
         choices=("base", "small", "medium"),
-        help="Local multilingual Whisper model size (first use downloads model files).",
+        help="Local Korean Whisper model size (first use downloads model files).",
     )
     return parser.parse_args()
 
@@ -81,6 +90,7 @@ def main() -> None:
                 microphone_device=microphone_device,
                 event_bus=EventBus(settings.runtime_queue_capacity),
                 chat_model=args.chat_model,
+                vision_model=args.vision_model,
                 speech_model=args.speech_model,
             )
         else:
