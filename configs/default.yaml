@@ -1,0 +1,8 @@
+runtime_queue_capacity: 128
+event_publish_timeout: 0.25
+shutdown_timeout: 2.0
+logging_level: INFO
+simulation_seed: 42
+audio_simulator_enabled: true
+vision_simulator_enabled: true
+hardware_simulator_enabled: true

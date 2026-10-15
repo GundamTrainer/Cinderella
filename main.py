@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 PROJECT_NAME = "Cinderella"
 PROJECT_VERSION = "0.1.0"
 
