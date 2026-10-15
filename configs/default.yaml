@@ -6,3 +6,5 @@ simulation_seed: 42
 audio_simulator_enabled: true
 vision_simulator_enabled: true
 hardware_simulator_enabled: true
+camera_index: 0
+microphone_device: null

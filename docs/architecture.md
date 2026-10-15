@@ -26,6 +26,10 @@ Long-running components implement a shared lifecycle interface: initialize, star
 
 Simulated audio, vision, and hardware components emit synthetic events only. They do not capture or store raw audio, images, or personal data.
 
+### Local device preview
+
+An opt-in command-line preview can display a camera feed and a microphone level meter using optional OpenCV and sounddevice dependencies. It is a local connectivity check only: it does not publish model-recognition events, run inference, or save recordings.
+
 ### Orchestrator
 
 The orchestrator is responsible for initializing components, starting them, consuming the event bus, and safely tearing down components in reverse order on shutdown or partial initialization failure.
@@ -34,8 +38,7 @@ The orchestrator is responsible for initializing components, starting them, cons
 
 The following areas are intentionally not implemented yet and are explicitly called out as future work:
 - multimodal model execution
-- microphone input and audio capture
-- camera input and frame capture
+- speech recognition and image recognition
 - hardware adapters and embedded device drivers
 - user-specific voice or character profiles
 - external cloud services or internet-connected features

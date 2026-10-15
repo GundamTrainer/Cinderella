@@ -22,6 +22,8 @@ class RuntimeSettings:
     audio_simulator_enabled: bool
     vision_simulator_enabled: bool
     hardware_simulator_enabled: bool
+    camera_index: int = 0
+    microphone_device: int | None = None
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> RuntimeSettings:
@@ -34,6 +36,9 @@ class RuntimeSettings:
             audio_simulator_enabled = bool(values["audio_simulator_enabled"])
             vision_simulator_enabled = bool(values["vision_simulator_enabled"])
             hardware_simulator_enabled = bool(values["hardware_simulator_enabled"])
+            camera_index = int(values.get("camera_index", 0))
+            microphone_value = values.get("microphone_device")
+            microphone_device = None if microphone_value is None else int(microphone_value)
         except KeyError as exc:  # pragma: no cover - defensive
             raise ConfigurationError(f"Missing required config key: {exc.args[0]}") from exc
         except (TypeError, ValueError) as exc:
@@ -49,6 +54,10 @@ class RuntimeSettings:
             raise ConfigurationError(
                 "logging_level must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL."
             )
+        if camera_index < 0:
+            raise ConfigurationError("camera_index must be zero or greater.")
+        if microphone_device is not None and microphone_device < 0:
+            raise ConfigurationError("microphone_device must be zero or greater.")
 
         return cls(
             runtime_queue_capacity=runtime_queue_capacity,
@@ -59,6 +68,8 @@ class RuntimeSettings:
             audio_simulator_enabled=audio_simulator_enabled,
             vision_simulator_enabled=vision_simulator_enabled,
             hardware_simulator_enabled=hardware_simulator_enabled,
+            camera_index=camera_index,
+            microphone_device=microphone_device,
         )
 
 

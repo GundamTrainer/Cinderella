@@ -10,6 +10,10 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.6.0",
 ]
+hardware = [
+  "opencv-python>=4.9",
+  "sounddevice>=0.4.6",
+]
 
 [tool.setuptools]
 packages = ["runtime", "runtime.event_bus"]

@@ -5,6 +5,7 @@ import pytest
 from runtime.component import Component, ComponentState, InvalidStateTransitionError
 from runtime.config import ConfigurationError, RuntimeSettings, load_runtime_settings
 from runtime.event_bus import Event, EventBus, EventBusClosedError, EventBusFullError, EventType
+from runtime.laptop_io import LaptopDeviceError, _audio_rms
 from runtime.orchestrator import RuntimeOrchestrator
 from runtime.simulators import SimulatedAudioSource, SimulatedHardwareAdapter, SimulatedVisionSource
 
@@ -224,3 +225,92 @@ def test_runtime_settings_reject_invalid_values() -> None:
             "vision_simulator_enabled": True,
             "hardware_simulator_enabled": True,
         })
+
+
+def test_audio_rms_handles_empty_and_silent_buffers() -> None:
+    class Samples:
+        def __init__(self, values: list[float]) -> None:
+            self.values = values
+            self.size = len(values)
+
+        def __pow__(self, power: int) -> Samples:
+            return Samples([value**power for value in self.values])
+
+        def mean(self) -> float:
+            return sum(self.values) / len(self.values)
+
+    assert _audio_rms(Samples([])) == 0.0
+    assert _audio_rms(Samples([0.0, 0.0, 0.0, 0.0])) == 0.0
+    assert _audio_rms(Samples([1.0, 1.0, 1.0, 1.0])) == 1.0
+
+
+def test_live_preview_requires_optional_hardware_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+    from runtime import laptop_io
+
+    original_import_module = laptop_io.importlib.import_module
+
+    def missing_cv2(name: str, *args: object, **kwargs: object) -> object:
+        if name == "cv2":
+            raise ModuleNotFoundError("No module named 'cv2'")
+        return original_import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(laptop_io.importlib, "import_module", missing_cv2)
+
+    with pytest.raises(LaptopDeviceError, match="hardware dependencies"):
+        laptop_io._load_device_libraries()
+
+
+def test_live_preview_stops_and_releases_devices_on_quit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from runtime import laptop_io
+
+    capture_state = {"released": False}
+    stream_state = {"started": False, "stopped": False, "closed": False}
+
+    class FakeCapture:
+        def isOpened(self) -> bool:
+            return True
+
+        def read(self) -> tuple[bool, str]:
+            return True, "frame"
+
+        def release(self) -> None:
+            capture_state["released"] = True
+
+    class FakeStream:
+        def start(self) -> None:
+            stream_state["started"] = True
+
+        def stop(self) -> None:
+            stream_state["stopped"] = True
+
+        def close(self) -> None:
+            stream_state["closed"] = True
+
+    fake_capture = FakeCapture()
+    fake_stream = FakeStream()
+    fake_cv2 = SimpleNamespace(
+        VideoCapture=lambda index: fake_capture,
+        putText=lambda *args: None,
+        imshow=lambda *args: None,
+        waitKey=lambda delay: ord("q"),
+        destroyAllWindows=lambda: None,
+        FONT_HERSHEY_SIMPLEX=0,
+    )
+    fake_sounddevice = SimpleNamespace(
+        query_devices=lambda *args: (
+            [{"name": "fake mic", "max_input_channels": 1, "default_samplerate": 16000}]
+            if not args
+            else {"name": "fake mic", "max_input_channels": 1, "default_samplerate": 16000}
+        ),
+        default=SimpleNamespace(device=(0, 0)),
+        InputStream=lambda **kwargs: fake_stream,
+    )
+    modules = {"cv2": fake_cv2, "sounddevice": fake_sounddevice}
+    monkeypatch.setattr(laptop_io.importlib, "import_module", modules.__getitem__)
+
+    laptop_io.run_live_preview(on_status=lambda message: None)
+
+    assert capture_state["released"] is True
+    assert stream_state == {"started": True, "stopped": True, "closed": True}
