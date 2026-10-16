@@ -18,6 +18,8 @@ class ExternalBackendAdapter:
         execution_device: str,
         external_program: bool,
         network_required: bool,
+        loopback_only: bool = False,
+        known_limitations: tuple[str, ...] = (),
     ) -> None:
         self._info = BackendInfo(
             name=name,
@@ -28,6 +30,11 @@ class ExternalBackendAdapter:
             execution_device=execution_device,
             external_program=external_program,
             network_required=network_required,
+            backend_id=name.casefold().replace(" ", "_"),
+            model_name=model_version,
+            model_source=checkpoint_source,
+            loopback_only=loopback_only,
+            known_limitations=known_limitations,
         )
         self._status = BackendStatus.UNAVAILABLE
         self._detail = "Not initialized."
@@ -137,6 +144,8 @@ class ExternalOllamaLanguageBackend(ExternalBackendAdapter):
             execution_device="local Ollama host",
             external_program=True,
             network_required=True,
+            loopback_only=True,
+            known_limitations=("Requires a separately installed local Ollama service.",),
         )
         self._model = model
         self._vision_model = vision_model

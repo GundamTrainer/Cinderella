@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,28 @@ class ConfigurationError(ValueError):
 
 
 LOGGING_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+_MISSING = object()
+
+
+def _integer(values: dict[str, Any], key: str, default: Any = _MISSING) -> int:
+    value = values[key] if default is _MISSING else values.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigurationError(f"{key} must be an integer.")
+    return value
+
+
+def _number(values: dict[str, Any], key: str) -> float:
+    value = values[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
+        raise ConfigurationError(f"{key} must be a finite number.")
+    return float(value)
+
+
+def _boolean(values: dict[str, Any], key: str) -> bool:
+    value = values[key]
+    if not isinstance(value, bool):
+        raise ConfigurationError(f"{key} must be a boolean.")
+    return value
 
 
 @dataclass(frozen=True)
@@ -30,24 +53,82 @@ class RuntimeSettings:
     audio_input_queue_capacity: int = 24
     network: NetworkPolicy = field(default_factory=NetworkPolicy)
 
+    def __post_init__(self) -> None:
+        for field_name in (
+            "runtime_queue_capacity",
+            "simulation_seed",
+            "camera_index",
+            "audio_input_queue_capacity",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigurationError(f"{field_name} must be an integer.")
+        for field_name in ("event_publish_timeout", "shutdown_timeout", "box_clamp_tolerance_pixels"):
+            value = getattr(self, field_name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+            ):
+                raise ConfigurationError(f"{field_name} must be a finite number.")
+        for field_name in (
+            "audio_simulator_enabled",
+            "vision_simulator_enabled",
+            "hardware_simulator_enabled",
+        ):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ConfigurationError(f"{field_name} must be a boolean.")
+        if self.microphone_device is not None and (
+            isinstance(self.microphone_device, bool)
+            or not isinstance(self.microphone_device, int)
+        ):
+            raise ConfigurationError("microphone_device must be an integer or None.")
+        if not isinstance(self.logging_level, str) or self.logging_level.upper() not in LOGGING_LEVELS:
+            raise ConfigurationError("logging_level must be a supported logging level.")
+        object.__setattr__(self, "logging_level", self.logging_level.upper())
+        if self.runtime_queue_capacity <= 0:
+            raise ConfigurationError("runtime_queue_capacity must be greater than zero.")
+        if self.event_publish_timeout <= 0:
+            raise ConfigurationError("event_publish_timeout must be greater than zero.")
+        if self.shutdown_timeout <= 0:
+            raise ConfigurationError("shutdown_timeout must be greater than zero.")
+        if self.camera_index < 0:
+            raise ConfigurationError("camera_index must be zero or greater.")
+        if self.microphone_device is not None and self.microphone_device < 0:
+            raise ConfigurationError("microphone_device must be zero or greater.")
+        if not 0 <= self.box_clamp_tolerance_pixels <= 32:
+            raise ConfigurationError("box_clamp_tolerance_pixels must be between 0 and 32.")
+        if self.audio_input_queue_capacity <= 0:
+            raise ConfigurationError("audio_input_queue_capacity must be positive.")
+        if not isinstance(self.network, NetworkPolicy):
+            raise ConfigurationError("network must be a NetworkPolicy.")
+
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> RuntimeSettings:
         try:
-            runtime_queue_capacity = int(values["runtime_queue_capacity"])
-            event_publish_timeout = float(values["event_publish_timeout"])
-            shutdown_timeout = float(values["shutdown_timeout"])
-            logging_level = str(values["logging_level"]).upper()
-            simulation_seed = int(values["simulation_seed"])
-            audio_simulator_enabled = bool(values["audio_simulator_enabled"])
-            vision_simulator_enabled = bool(values["vision_simulator_enabled"])
-            hardware_simulator_enabled = bool(values["hardware_simulator_enabled"])
-            camera_index = int(values.get("camera_index", 0))
+            runtime_queue_capacity = _integer(values, "runtime_queue_capacity")
+            event_publish_timeout = _number(values, "event_publish_timeout")
+            shutdown_timeout = _number(values, "shutdown_timeout")
+            logging_value = values["logging_level"]
+            if not isinstance(logging_value, str):
+                raise ConfigurationError("logging_level must be a string.")
+            logging_level = logging_value.upper()
+            simulation_seed = _integer(values, "simulation_seed")
+            audio_simulator_enabled = _boolean(values, "audio_simulator_enabled")
+            vision_simulator_enabled = _boolean(values, "vision_simulator_enabled")
+            hardware_simulator_enabled = _boolean(values, "hardware_simulator_enabled")
+            camera_index = _integer(values, "camera_index", 0)
             microphone_value = values.get("microphone_device")
-            microphone_device = None if microphone_value is None else int(microphone_value)
-            box_clamp_tolerance_pixels = float(
-                values.get("box_clamp_tolerance_pixels", 2.0)
+            if microphone_value is None:
+                microphone_device = None
+            else:
+                microphone_device = _integer(values, "microphone_device")
+            box_clamp_tolerance_pixels = (
+                _number(values, "box_clamp_tolerance_pixels")
+                if "box_clamp_tolerance_pixels" in values
+                else 2.0
             )
-            audio_input_queue_capacity = int(values.get("audio_input_queue_capacity", 24))
+            audio_input_queue_capacity = _integer(values, "audio_input_queue_capacity", 24)
             network_values = values.get("network", {})
             if not isinstance(network_values, dict):
                 raise ConfigurationError("network must be a mapping.")
@@ -56,14 +137,14 @@ class RuntimeSettings:
             raise
         except KeyError as exc:  # pragma: no cover - defensive
             raise ConfigurationError(f"Missing required config key: {exc.args[0]}") from exc
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ConfigurationError(f"Invalid config value type: {exc}") from exc
 
         if runtime_queue_capacity <= 0:
             raise ConfigurationError("runtime_queue_capacity must be greater than zero.")
-        if event_publish_timeout <= 0:
+        if event_publish_timeout <= 0 or not isfinite(event_publish_timeout):
             raise ConfigurationError("event_publish_timeout must be greater than zero.")
-        if shutdown_timeout <= 0:
+        if shutdown_timeout <= 0 or not isfinite(shutdown_timeout):
             raise ConfigurationError("shutdown_timeout must be greater than zero.")
         if logging_level not in LOGGING_LEVELS:
             raise ConfigurationError(
@@ -73,7 +154,10 @@ class RuntimeSettings:
             raise ConfigurationError("camera_index must be zero or greater.")
         if microphone_device is not None and microphone_device < 0:
             raise ConfigurationError("microphone_device must be zero or greater.")
-        if not 0.0 <= box_clamp_tolerance_pixels <= 32.0:
+        if (
+            not isfinite(box_clamp_tolerance_pixels)
+            or not 0.0 <= box_clamp_tolerance_pixels <= 32.0
+        ):
             raise ConfigurationError(
                 "box_clamp_tolerance_pixels must be between 0 and 32."
             )

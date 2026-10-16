@@ -38,14 +38,17 @@ class BoundingBox:
 
     def __post_init__(self) -> None:
         values = (self.x_min, self.y_min, self.x_max, self.y_max)
+        try:
+            numeric_values = tuple(float(value) for value in values)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Bounding box coordinates must be finite values in [0, 1].") from exc
         if any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not isfinite(value)
-            or not 0.0 <= value <= 1.0
+            isinstance(value, bool) or not isinstance(value, (int, float))
             for value in values
-        ):
+        ) or any(not isfinite(value) or not 0.0 <= value <= 1.0 for value in numeric_values):
             raise ValueError("Bounding box coordinates must be finite values in [0, 1].")
+        for field_name, value in zip(("x_min", "y_min", "x_max", "y_max"), numeric_values):
+            object.__setattr__(self, field_name, value)
         if self.x_min >= self.x_max or self.y_min >= self.y_max:
             raise ValueError("Bounding box must have positive width and height.")
 
@@ -63,6 +66,13 @@ class DetectionResult:
     state: DetectionState = DetectionState.CANDIDATE
     track_id: int | None = None
     last_seen: float | None = None
+    coordinate_space: CoordinateSpace = CoordinateSpace.NORMALIZED_XYXY
+    frame_id: int = 0
+    timestamp: float | None = None
+    source_backend: str = "unknown"
+    raw_class_id: int | float | str | None = None
+    validation_errors: tuple[str, ...] = ()
+    synthetic: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -84,6 +94,27 @@ class DetectionResult:
             raise TypeError("box must be a validated BoundingBox.")
         if not isinstance(self.state, DetectionState):
             raise TypeError("state must be a DetectionState.")
+        if not isinstance(self.coordinate_space, CoordinateSpace):
+            raise TypeError("coordinate_space must be a CoordinateSpace.")
+        if isinstance(self.frame_id, bool) or not isinstance(self.frame_id, int) or self.frame_id < 0:
+            raise ValueError("frame_id must be a nonnegative integer.")
+        if self.timestamp is not None and (
+            isinstance(self.timestamp, bool)
+            or not isinstance(self.timestamp, (int, float))
+            or not isfinite(self.timestamp)
+        ):
+            raise ValueError("timestamp must be finite.")
+        if not isinstance(self.source_backend, str) or not self.source_backend.strip():
+            raise ValueError("source_backend must not be empty.")
+        if self.raw_class_id is not None and (
+            isinstance(self.raw_class_id, bool)
+            or not isinstance(self.raw_class_id, (int, float, str))
+        ):
+            raise TypeError("raw_class_id must be a string, number, or None.")
+        if not isinstance(self.synthetic, bool):
+            raise TypeError("synthetic must be a boolean.")
+        if any(not isinstance(item, str) or not item.strip() for item in self.validation_errors):
+            raise ValueError("validation_errors must contain non-empty strings.")
         if self.track_id is not None and (
             isinstance(self.track_id, bool)
             or not isinstance(self.track_id, int)
@@ -97,6 +128,26 @@ class DetectionResult:
             or self.last_seen < 0
         ):
             raise ValueError("last_seen must be finite and nonnegative.")
+
+    @property
+    def normalized_class_id(self) -> int:
+        return self.class_id
+
+    @property
+    def normalized_label(self) -> str:
+        return self.label
+
+    @property
+    def tracking_id(self) -> int | None:
+        return self.track_id
+
+    @property
+    def stable(self) -> bool:
+        return self.state == DetectionState.STABLE
+
+    @property
+    def validation_status(self) -> DetectionState:
+        return self.state
 
 
 @dataclass(frozen=True)
@@ -115,6 +166,7 @@ class DetectionObservation:
     validation_errors: tuple[str, ...] = ()
     tracking_id: int | None = None
     synthetic: bool = False
+    raw_label: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.detection_id, str) or not isinstance(self.source_backend, str):
@@ -146,6 +198,14 @@ class DetectionObservation:
             raise TypeError("coordinate_space must be a CoordinateSpace.")
         if not isinstance(self.status, DetectionState):
             raise TypeError("status must be a DetectionState.")
+        if not isinstance(self.synthetic, bool):
+            raise TypeError("synthetic must be a boolean.")
+        if any(not isinstance(item, str) or not item.strip() for item in self.validation_errors):
+            raise ValueError("validation_errors must contain non-empty strings.")
+
+    @property
+    def validation_status(self) -> DetectionState:
+        return self.status
 
 
 @dataclass(frozen=True)
@@ -195,13 +255,19 @@ def normalize_bounding_box(
         raise BoundingBoxConversionError("clamp tolerance must be finite and nonnegative.")
     if not isinstance(coordinate_space, CoordinateSpace):
         raise BoundingBoxConversionError("coordinate_space must be a CoordinateSpace value.")
-    if len(coordinates) != 4 or any(
-        isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value)
+    if not isinstance(coordinates, (tuple, list)) or len(coordinates) != 4:
+        raise BoundingBoxConversionError("box coordinates must contain exactly four finite numbers.")
+    try:
+        numeric_coordinates = tuple(float(value) for value in coordinates)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise BoundingBoxConversionError("box coordinates must be finite numbers.") from exc
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
         for value in coordinates
-    ):
+    ) or any(not isfinite(value) for value in numeric_coordinates):
         raise BoundingBoxConversionError("box coordinates must be finite numbers.")
 
-    first, second, third, fourth = (float(value) for value in coordinates)
+    first, second, third, fourth = numeric_coordinates
     if coordinate_space in {CoordinateSpace.PIXEL_XYWH, CoordinateSpace.NORMALIZED_XYWH}:
         if third <= 0 or fourth <= 0:
             raise BoundingBoxConversionError("box width and height must be positive.")
@@ -291,7 +357,7 @@ def convert_detector_results(
         confidence: float | None = None,
         box: BoundingBox | None = None,
         status: DetectionState = DetectionState.REJECTED,
-        coordinate_space: CoordinateSpace = CoordinateSpace.NORMALIZED_XYXY,
+        coordinate_space: CoordinateSpace = CoordinateSpace.PIXEL_XYWH,
     ) -> None:
         diagnostics[reason] += 1
         unverified.append(
@@ -308,6 +374,7 @@ def convert_detector_results(
                 coordinate_space=coordinate_space,
                 status=status,
                 validation_errors=(reason,),
+                raw_label=label,
             )
         )
 
@@ -444,7 +511,19 @@ def convert_detector_results(
                 status=DetectionState.UNSUPPORTED_CLASS,
             )
         else:
-            accepted.append(DetectionResult(class_id, label, confidence, box))
+            accepted.append(
+                DetectionResult(
+                    class_id,
+                    label,
+                    confidence,
+                    box,
+                    coordinate_space=CoordinateSpace.PIXEL_XYWH,
+                    frame_id=frame_id,
+                    timestamp=timestamp,
+                    source_backend=source_backend,
+                    raw_class_id=raw_class_id_value,
+                )
+            )
 
     return DetectionConversion(
         tuple(accepted), tuple(unverified), tuple(sorted(diagnostics.items()))
@@ -493,6 +572,12 @@ class _DetectionTrack:
     hits: int
     missed_frames: int
     last_seen: float
+    first_seen_at: float
+    coordinate_space: CoordinateSpace
+    frame_id: int
+    source_backend: str
+    raw_class_id: int | float | str | None
+    synthetic: bool
 
 
 class DetectionStabilizer:
@@ -622,6 +707,11 @@ class DetectionStabilizer:
                 track.hits += 1
                 track.missed_frames = 0
                 track.last_seen = observed_at
+                track.coordinate_space = detection.coordinate_space
+                track.frame_id = frame_id
+                track.source_backend = source_backend
+                track.raw_class_id = detection.raw_class_id
+                track.synthetic = detection.synthetic
             else:
                 track = _DetectionTrack(
                     self._next_track_id,
@@ -632,6 +722,12 @@ class DetectionStabilizer:
                     1,
                     0,
                     observed_at,
+                    observed_at,
+                    detection.coordinate_space,
+                    frame_id,
+                    source_backend,
+                    detection.raw_class_id,
+                    detection.synthetic,
                 )
                 self._next_track_id += 1
                 self._tracks.append(track)
@@ -652,6 +748,12 @@ class DetectionStabilizer:
                 else DetectionState.CANDIDATE,
                 track.track_id,
                 track.last_seen,
+                coordinate_space=track.coordinate_space,
+                frame_id=track.frame_id,
+                timestamp=track.last_seen,
+                source_backend=track.source_backend,
+                raw_class_id=track.raw_class_id,
+                synthetic=track.synthetic,
             )
             for track in self._tracks
             if track.hits >= self.stable_hits
@@ -671,6 +773,9 @@ class DetectionStabilizer:
                         bounding_box=track.box,
                         status=DetectionState.UNSTABLE,
                         tracking_id=track.track_id,
+                        coordinate_space=track.coordinate_space,
+                        raw_label=track.label,
+                        synthetic=track.synthetic,
                     )
                 )
         for reason, count in tuple(diagnostic_counts.items()):
@@ -702,8 +807,11 @@ class DetectionStabilizer:
             label="unknown",
             confidence=detection.confidence,
             bounding_box=detection.box,
+            coordinate_space=detection.coordinate_space,
             status=status,
             tracking_id=detection.track_id,
+            synthetic=detection.synthetic,
+            raw_label=detection.label,
         )
 
 

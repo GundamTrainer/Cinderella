@@ -17,7 +17,15 @@ from ai.external_backends import (
     ExternalSapiSpeechBackend,
     ExternalWhisperBackend,
 )
+from ai.observation import (
+    Observation,
+    ObservationType,
+    ObservationValidity,
+    UnknownObservationTypeError,
+)
 from ai.scene import (
+    Belief,
+    ConfirmationStatus,
     InterpretationHypothesis,
     SceneObservation,
     WorldStateTracker,
@@ -27,6 +35,7 @@ from ai.vision import (
     BoundingBox,
     CoordinateSpace,
     DetectionFrame,
+    DetectionObservation,
     DetectionResult,
     DetectionStabilizer,
     DetectionState,
@@ -59,6 +68,26 @@ def test_detection_stabilizer_only_promotes_repeated_confident_boxes() -> None:
     assert len(second.stable_detections) == 1
     assert second.stable_detections[0].state == DetectionState.STABLE
     assert second.stable_detections[0].track_id == 1
+
+
+def test_detection_stabilizer_keeps_nearby_objects_on_distinct_tracks() -> None:
+    stabilizer = DetectionStabilizer(
+        minimum_confidence=0.5,
+        stable_hits=1,
+        supported_class_ids={1},
+    )
+    detections = (
+        DetectionResult(1, "book", 0.9, BoundingBox(0.1, 0.2, 0.3, 0.5)),
+        DetectionResult(1, "book", 0.9, BoundingBox(0.32, 0.2, 0.52, 0.5)),
+    )
+
+    first = stabilizer.update(detections, observed_at=1.0, frame_id=1)
+    second = stabilizer.update(detections, observed_at=1.2, frame_id=2)
+
+    first_ids = tuple(item.track_id for item in first.stable_detections)
+    second_ids = tuple(item.track_id for item in second.stable_detections)
+    assert len(set(first_ids)) == 2
+    assert second_ids == first_ids
 
 
 def test_detection_stabilizer_keeps_low_confidence_as_unknown() -> None:
@@ -247,6 +276,85 @@ def test_detector_conversion_selects_highest_valid_category_score() -> None:
     assert result.detections[0].class_id == 1
     assert result.detections[0].label == "book"
     assert result.detections[0].confidence == 0.9
+    assert result.detections[0].coordinate_space == CoordinateSpace.PIXEL_XYWH
+    assert result.detections[0].normalized_label == "book"
+    assert result.detections[0].normalized_class_id == 1
+
+
+@pytest.mark.parametrize(
+    ("categories", "expected_status"),
+    (
+        (None, DetectionState.MISSING_CLASS),
+        ([], DetectionState.MISSING_CLASS),
+        ([SimpleNamespace(index=0, category_name=None, score=0.9)], DetectionState.UNKNOWN),
+        ([SimpleNamespace(index=100, category_name="unsupported", score=0.9)], DetectionState.UNSUPPORTED_CLASS),
+        ([SimpleNamespace(index=0, category_name="person", score=float("nan"))], DetectionState.REJECTED),
+    ),
+)
+def test_detector_conversion_keeps_malformed_or_unsupported_results_unverified(
+    categories: object,
+    expected_status: DetectionState,
+) -> None:
+    result = convert_detector_results(
+        [
+            SimpleNamespace(
+                categories=categories,
+                bounding_box=SimpleNamespace(origin_x=10, origin_y=20, width=30, height=40),
+            )
+        ],
+        frame_id=3,
+        timestamp=1.0,
+        image_width=200,
+        image_height=100,
+        supported_class_ids=set(range(80)),
+    )
+
+    assert result.detections == ()
+    assert result.unverified[0].status == expected_status
+
+
+def test_observation_json_round_trip_preserves_typed_metadata() -> None:
+    observation = Observation(
+        observation_type=ObservationType.OBJECT_CANDIDATE,
+        source="camera",
+        source_backend="mediapipe",
+        frame_id=12,
+        monotonic_time=4.5,
+        confidence=0.82,
+        validity=ObservationValidity.UNSTABLE,
+        payload={"label": "unknown", "bounding_box": [0.1, 0.2, 0.3, 0.4]},
+        synthetic=True,
+        warnings=("awaiting another frame",),
+    )
+
+    restored = Observation.from_json(observation.to_json())
+
+    assert restored.to_dict() == observation.to_dict()
+
+
+def test_observation_rejects_unknown_type_and_non_json_sensor_data() -> None:
+    with pytest.raises(UnknownObservationTypeError, match="Unknown observation type"):
+        Observation.from_dict(
+            {
+                "observation_type": "object_that_does_not_exist",
+                "source": "camera",
+                "source_backend": "test",
+                "confidence": 0.5,
+                "validity": "unknown",
+                "payload": {},
+            }
+        )
+
+    with pytest.raises(TypeError, match="unsupported value"):
+        Observation(
+            observation_type=ObservationType.OBJECT_CANDIDATE,
+            source="camera",
+            source_backend="test",
+            frame_id=1,
+            confidence=0.5,
+            validity=ObservationValidity.UNKNOWN,
+            payload={"frame": b"raw-frame"},
+        )
 
 
 def test_audio_input_buffer_is_bounded_and_marks_device_overflow() -> None:
@@ -323,8 +431,15 @@ def test_world_state_tracks_stable_motion_and_expires_missing_objects() -> None:
         last_seen=2.0,
     )
 
-    assert tracker.update(observation(1.0, first)).objects[0].motion == "unknown"
-    assert tracker.update(observation(2.0, second)).objects[0].motion == "moving"
+    first_state = tracker.update(observation(1.0, first))
+    second_state = tracker.update(observation(2.0, second))
+
+    assert first_state.objects[0].motion == "unknown"
+    assert first_state.objects[0].first_seen_at == 1.0
+    assert second_state.objects[0].motion == "moving"
+    assert second_state.objects[0].observation_count == 2
+    assert second_state.objects[0].position_history == ((0.2, 0.35), (0.4, 0.35))
+    assert second_state.objects[0].velocity_estimate == pytest.approx((0.2, 0.0))
     assert tracker.update(observation(4.1, None)).objects == ()
 
 
@@ -346,10 +461,69 @@ def test_world_state_rejects_out_of_order_observations() -> None:
         tracker.update(observation(0.5))
 
 
-def test_tentative_affect_hypothesis_is_low_confidence_and_requires_confirmation() -> None:
+def test_world_state_retains_recent_uncertainty_and_does_not_confirm_beliefs() -> None:
+    tracker = WorldStateTracker(uncertainty_expiration_seconds=1.0)
+    face_features = FaceFeatureStabilizer().update(None, face_count=0, observed_at=1.0)
+
+    def observation(timestamp: float, unverified: tuple[DetectionObservation, ...] = ()) -> SceneObservation:
+        return SceneObservation(
+            frame_id=int(timestamp * 10),
+            observed_at=timestamp,
+            detections=DetectionFrame(timestamp, (), (), unverified_detections=unverified),
+            action_cues=(),
+            face_features=face_features,
+        )
+
+    uncertain = DetectionObservation(
+        detection_id="1:0",
+        frame_id=10,
+        timestamp=1.0,
+        source_backend="test",
+        label="unknown",
+        status=DetectionState.UNKNOWN,
+    )
+    assert tracker.update(observation(1.0, (uncertain,))).uncertain_labels == ("unknown",)
+    assert tracker.update(observation(1.5)).uncertain_labels == ("unknown",)
+    assert tracker.update(observation(2.1)).uncertain_labels == ()
+
+    belief = Belief(
+        belief_id="belief-1",
+        subject="object-1",
+        predicate="label",
+        value="cup",
+        source_type="direct_observation",
+        source_references=("observation-1",),
+        confidence=0.6,
+        created_at=2.1,
+        expires_at=3.0,
+    )
+    tracker.add_belief(belief)
+    assert tracker.snapshot().active_beliefs[0].confirmation_status == ConfirmationStatus.UNCONFIRMED
+    assert tracker.update(observation(3.1)).active_beliefs == ()
+
+
+def test_face_only_cues_do_not_create_affect_hypotheses() -> None:
     hypotheses = tentative_affect_hypotheses(
         ("smile-like facial movement",),
         observed_at=5.0,
+    )
+
+    assert hypotheses == ()
+    corroborated = tentative_affect_hypotheses(
+        ("smile-like facial movement",),
+        observed_at=5.0,
+        corroborating_source_types=("speech_prosody",),
+    )
+    assert len(corroborated) == 1
+    assert corroborated[0].allowed_for_speech is False
+    assert corroborated[0].source_types == ("visual_facial_movement", "speech_prosody")
+
+
+def test_multimodal_affect_hypothesis_remains_tentative() -> None:
+    hypotheses = tentative_affect_hypotheses(
+        ("smile-like facial movement",),
+        observed_at=5.0,
+        corroborating_source_types=("speech_prosody",),
     )
 
     assert len(hypotheses) == 1
@@ -358,7 +532,7 @@ def test_tentative_affect_hypothesis_is_low_confidence_and_requires_confirmation
     assert hypotheses[0].uncertainty.startswith("high")
     assert hypotheses[0].requires_confirmation
     assert hypotheses[0].valid_until == 7.0
-    assert hypotheses[0].source_types == ("visual_facial_movement",)
+    assert hypotheses[0].source_types == ("visual_facial_movement", "speech_prosody")
     assert hypotheses[0].label == "possible_positive_affect"
     assert tentative_affect_hypotheses((), observed_at=5.0) == ()
 
@@ -443,6 +617,8 @@ def test_vision_analyzer_normalizes_boxes_and_only_exposes_stable_labels(
     if expected_objects:
         assert second.world_state.objects[0].label == "person"
         assert "person at" in second.prompt_context()
+        assert second.observation.observations[0].validity == ObservationValidity.VALID
+        assert second.observation.observations[0].payload["label"] == "person"
     else:
         assert second.world_state.uncertain_labels == ("unknown",)
         assert "미확정 후보=unknown" in second.prompt_context()
@@ -507,6 +683,10 @@ def test_external_backend_metadata_identifies_provenance_and_pretrained_weights(
         True,
         None,
     ]
+    assert backends[0].backend_info.backend_id == "faster-whisper"
+    assert backends[0].backend_info.model_source == "Systran/faster-whisper"
+    assert backends[2].backend_info.loopback_only is True
+    assert backends[2].backend_info.known_limitations
 
 
 def test_whisper_adapter_exposes_transcription_rejection_reason() -> None:

@@ -14,13 +14,14 @@ Implemented:
 - optional laptop camera/microphone preview
 - opt-in local Whisper transcription, MediaPipe object/pose/face-movement inference, local image-aware Ollama conversation, and offline Korean speech output, with external-backend provenance adapters; concrete model implementations are not yet fully separated from the live pipeline
 - validated object observations that distinguish invalid, unsupported, low-confidence, and unstable results; normalized boxes are clamped only within a small frame-edge tolerance and stable labels require repeated detections. This improves result handling and consistency, not detector accuracy.
-- short-lived world-state observations with coarse object regions and motion cues, plus bounded microphone buffering with overflow, drop, queue-pressure, and segment diagnostics
+- JSON-safe typed observations plus short-lived world-state tracking with object regions, motion and position history; uncertain labels persist briefly across empty frames before expiring
+- bounded microphone buffering with overflow, drop, queue-pressure, and segment diagnostics
 - typed capability provenance/status records; the former 54% estimate is retained only as a developer helper and is no longer shown in the live overlay
 - opt-in provider contracts, conservative policy validation, HTTPS allowlisting, redirect checks, response-size limits, bounded retries, and TTL caching
 - offline-first provider scaffolding for MediaWiki, Open-Meteo, local status, approved static records, citations, and single-tool decision plans
 - local SQLite persistence APIs for identity, relationship, and explicitly consented memories; not automatically connected to chat or initialized by the CLI
 - typed identity-change review, evidence-bound relationship changes, approval-gated goals, and source-aware response plans
-- tentative facial-cue hypotheses marked low-confidence and requiring user confirmation; these are not validated emotion recognition
+- face movement alone does not create a state hypothesis; the optional heuristic requires independent non-facial evidence and is not connected to the live dialogue path
 - object-detection annotation validation and a basic class-aware IoU evaluation helper
 - quiet-pause and stable visual-cue conversation prompts, with basic speech-interruption detection
 - pytest coverage for the runtime foundation
@@ -39,7 +40,7 @@ New information providers remain offline and disabled by default. MediaWiki is b
 
 ## Runtime foundation
 
-The simulated runtime is intentionally deterministic. The separate live preview and AI modes are opt-in and use local hardware only while running. See [docs/model-migration-plan.md](docs/model-migration-plan.md) for the staged replacement plan and [docs/dependency-audit.md](docs/dependency-audit.md) for current backend provenance.
+The simulated runtime is intentionally deterministic. The separate live preview and AI modes are opt-in and use local hardware only while running. World-state freshness is checked by the simulation safety gate; this is not a certified hardware safety controller. See [docs/model-migration-plan.md](docs/model-migration-plan.md) for the staged replacement plan, [docs/dependency-audit.md](docs/dependency-audit.md) for current backend provenance, and [docs/state-understanding.md](docs/state-understanding.md) for observation/belief boundaries.
 
 To inspect the simulation-only physical-AI action/safety flow without opening hardware:
 

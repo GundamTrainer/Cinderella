@@ -24,7 +24,7 @@ The bounded research results motivate separations that are useful even without t
 3. Vary simulated scene and sensor parameters to probe failure cases. Randomization broadens test coverage; it does not prove real-world coverage.
 4. Measure each narrow task using explicit success/failure criteria rather than a single “human-like” score.
 
-The runtime implementation in `runtime/physical_ai.py` follows only the simulation-side action boundary: it emits a planner proposal, a separate safety decision, and—only for an approved motion/stop proposal—a `hardware.command_simulated` event. Motion is rejected when the scene contains stable or uncertain objects, when confidence is below the configured threshold, when a proposal is not synthetic, or when the simulated distance exceeds the small configured limit. No camera, motor, robot, or actuator API is called. This simulation gate is a testable software policy, not a certified physical safety controller or emergency stop.
+The runtime implementation in `runtime/physical_ai.py` follows only the simulation-side action boundary: it emits a planner proposal, a separate safety decision, and—only for an approved motion/stop proposal—a `hardware.command_simulated` event. Motion is rejected when the scene contains stable or uncertain objects, when confidence is below the configured threshold, when a proposal is not synthetic, when the world-state timestamp is invalid, future-dated, or older than the one-second default freshness window, or when the simulated distance exceeds the small configured limit. The clock is injectable for deterministic tests. No camera, motor, robot, or actuator API is called. This simulation gate is a testable software policy, not a certified physical safety controller or emergency stop.
 
 Run the deterministic clear-scene/uncertain-scene safety example without opening devices:
 
@@ -36,7 +36,7 @@ The demo serializes its proposal, approval/rejection, and simulated-command even
 
 ## Tentative affect hypotheses
 
-`ai/scene.py` can generate short-lived, rule-based hypotheses from explicit visible movement cues (for example, smile-like movement). Each currently uses a fixed 0.25 score, high uncertainty, a short expiration, and `requires_confirmation=True`. That value is a heuristic placeholder, not a calibrated probability. A hypothesis is not a diagnosis, does not establish a person's true state, and should be phrased as a question rather than asserted as fact. The feature is deliberately reported as partial implementation only.
+Face movement alone does not generate a state hypothesis. The helper requires an explicitly supplied independent non-facial source and still marks any result as an uncalibrated, short-lived hypothesis that is not allowed for speech. The live pipeline does not supply such corroboration, so it currently creates no affect hypotheses. This is not emotion recognition or diagnosis.
 
 ## Quality targets and evidence still needed
 

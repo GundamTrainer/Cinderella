@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
+from time import monotonic
 
 from ai.scene import WorldState
 from runtime.event_bus import Event, EventBus, EventType
@@ -61,6 +63,8 @@ class PhysicalAiSimulator:
         *,
         minimum_confidence: float = 0.7,
         maximum_simulated_distance_meters: float = 0.1,
+        maximum_world_state_age_seconds: float = 1.0,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
         if (
             isinstance(minimum_confidence, bool)
@@ -76,13 +80,33 @@ class PhysicalAiSimulator:
             or maximum_simulated_distance_meters <= 0
         ):
             raise ValueError("maximum simulated distance must be finite and positive.")
+        if (
+            isinstance(maximum_world_state_age_seconds, bool)
+            or not isinstance(maximum_world_state_age_seconds, (int, float))
+            or not isfinite(maximum_world_state_age_seconds)
+            or maximum_world_state_age_seconds <= 0
+        ):
+            raise ValueError("maximum world-state age must be finite and positive.")
         self.event_bus = event_bus
         self.minimum_confidence = minimum_confidence
         self.maximum_simulated_distance_meters = maximum_simulated_distance_meters
+        self.maximum_world_state_age_seconds = maximum_world_state_age_seconds
+        self._clock = clock
 
     def evaluate(self, proposal: ActionProposal, world_state: WorldState) -> SafetyDecision:
         if proposal.action == SimulatedAction.STOP:
             return SafetyDecision(True, "stop_action_always_allowed")
+        now = self._clock()
+        if (
+            isinstance(world_state.observed_at, bool)
+            or not isinstance(world_state.observed_at, (int, float))
+            or not isfinite(world_state.observed_at)
+        ):
+            return SafetyDecision(False, "invalid_world_state_time")
+        if world_state.observed_at > now:
+            return SafetyDecision(False, "world_state_from_future")
+        if now - world_state.observed_at > self.maximum_world_state_age_seconds:
+            return SafetyDecision(False, "world_state_stale")
         if proposal.confidence < self.minimum_confidence:
             return SafetyDecision(False, "confidence_below_safety_threshold")
         if proposal.action == SimulatedAction.MOVE_FORWARD:
@@ -146,10 +170,11 @@ class PhysicalAiSimulator:
 
 def run_physical_ai_safety_demo(event_bus: EventBus) -> tuple[Event, ...]:
     """Run deterministic clear-scene and uncertain-scene motion examples."""
-    simulator = PhysicalAiSimulator(event_bus)
-    clear_scene = WorldState(observed_at=0.0, objects=(), uncertain_labels=())
+    observed_at = monotonic()
+    simulator = PhysicalAiSimulator(event_bus, clock=lambda: observed_at)
+    clear_scene = WorldState(observed_at=observed_at, objects=(), uncertain_labels=())
     uncertain_scene = WorldState(
-        observed_at=1.0,
+        observed_at=observed_at,
         objects=(),
         uncertain_labels=("unverified object",),
     )

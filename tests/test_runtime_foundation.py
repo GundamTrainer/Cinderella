@@ -13,6 +13,7 @@ from runtime.ai_pipeline import (
     ProactiveConversationScheduler,
     _asks_about_visual_context,
     _ChatJob,
+    _publish_event,
     _queue_text_chat_message,
     _smooth_blendshapes,
     _visual_chat_frame,
@@ -60,7 +61,7 @@ def test_capability_statuses_are_provenance_not_an_accuracy_percentage() -> None
 
 def test_physical_ai_simulation_emits_proposal_safety_and_simulated_command() -> None:
     bus = EventBus(8)
-    simulator = PhysicalAiSimulator(bus)
+    simulator = PhysicalAiSimulator(bus, clock=lambda: 1.0)
     scene = WorldState(observed_at=1.0, objects=(), uncertain_labels=())
     proposal = ActionProposal(
         SimulatedAction.MOVE_FORWARD,
@@ -84,7 +85,7 @@ def test_physical_ai_simulation_emits_proposal_safety_and_simulated_command() ->
 
 def test_physical_ai_safety_gate_rejects_motion_when_scene_is_uncertain() -> None:
     bus = EventBus(8)
-    simulator = PhysicalAiSimulator(bus)
+    simulator = PhysicalAiSimulator(bus, clock=lambda: 1.0)
     scene = WorldState(
         observed_at=1.0,
         objects=(),
@@ -109,7 +110,7 @@ def test_physical_ai_safety_gate_rejects_motion_when_scene_is_uncertain() -> Non
 
 
 def test_physical_ai_rejects_out_of_bounds_and_low_confidence_motion() -> None:
-    simulator = PhysicalAiSimulator(EventBus(8))
+    simulator = PhysicalAiSimulator(EventBus(8), clock=lambda: 1.0)
     scene = WorldState(observed_at=1.0, objects=(), uncertain_labels=())
 
     too_far = ActionProposal(
@@ -127,6 +128,25 @@ def test_physical_ai_rejects_out_of_bounds_and_low_confidence_motion() -> None:
 
     assert simulator.evaluate(too_far, scene).reason == "simulated_distance_limit_exceeded"
     assert simulator.evaluate(low_confidence, scene).reason == "confidence_below_safety_threshold"
+
+
+def test_physical_ai_rejects_stale_world_state_but_always_allows_stop() -> None:
+    simulator = PhysicalAiSimulator(EventBus(8), clock=lambda: 10.0)
+    stale_scene = WorldState(observed_at=1.0, objects=(), uncertain_labels=())
+    move = ActionProposal(
+        SimulatedAction.MOVE_FORWARD,
+        confidence=0.99,
+        reason="stale-world-state test",
+        distance_meters=0.05,
+    )
+    stop = ActionProposal(
+        SimulatedAction.STOP,
+        confidence=0.0,
+        reason="emergency stop",
+    )
+
+    assert simulator.evaluate(move, stale_scene).reason == "world_state_stale"
+    assert simulator.evaluate(stop, stale_scene).approved
 
 
 def test_physical_ai_demo_is_deterministic_and_never_actuates_hardware() -> None:
@@ -237,6 +257,25 @@ def test_queue_capacity_is_enforced() -> None:
 
     with pytest.raises(EventBusFullError):
         bus.publish(Event.create(EventType.SYSTEM_STOPPING, "runtime"), block=True, timeout=0.01)
+
+
+def test_live_event_publisher_uses_bounded_configured_timeout() -> None:
+    class CapturingBus:
+        def __init__(self) -> None:
+            self.arguments: tuple[bool, float | None] | None = None
+
+        def publish(self, event: Event, *, block: bool, timeout: float | None) -> None:
+            del event
+            self.arguments = (block, timeout)
+
+    bus = CapturingBus()
+    _publish_event(
+        bus,  # type: ignore[arg-type]
+        Event.create(EventType.SYSTEM_STARTED, "runtime"),
+        timeout=0.75,
+    )
+
+    assert bus.arguments == (True, 0.75)
 
 
 def test_close_rejects_future_publishes() -> None:
@@ -393,6 +432,43 @@ def test_runtime_settings_reject_invalid_values() -> None:
                 "hardware_simulator_enabled": True,
             }
         )
+
+
+@pytest.mark.parametrize("value", ("false", 0, 1, None))
+def test_runtime_settings_reject_non_boolean_simulator_flags(value: object) -> None:
+    values = {
+        "runtime_queue_capacity": 8,
+        "event_publish_timeout": 0.25,
+        "shutdown_timeout": 1.0,
+        "logging_level": "INFO",
+        "simulation_seed": 42,
+        "audio_simulator_enabled": value,
+        "vision_simulator_enabled": True,
+        "hardware_simulator_enabled": True,
+    }
+
+    with pytest.raises(ConfigurationError, match="audio_simulator_enabled must be a boolean"):
+        RuntimeSettings.from_mapping(values)
+
+
+def test_runtime_settings_rejects_non_finite_timeouts_and_coerced_integers() -> None:
+    values = {
+        "runtime_queue_capacity": 8,
+        "event_publish_timeout": float("nan"),
+        "shutdown_timeout": 1.0,
+        "logging_level": "INFO",
+        "simulation_seed": 42,
+        "audio_simulator_enabled": True,
+        "vision_simulator_enabled": True,
+        "hardware_simulator_enabled": True,
+    }
+    with pytest.raises(ConfigurationError, match="finite number"):
+        RuntimeSettings.from_mapping(values)
+
+    values["runtime_queue_capacity"] = "8"
+    values["event_publish_timeout"] = 0.25
+    with pytest.raises(ConfigurationError, match="runtime_queue_capacity must be an integer"):
+        RuntimeSettings.from_mapping(values)
 
 
 def test_audio_rms_handles_empty_and_silent_buffers() -> None:

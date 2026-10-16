@@ -106,6 +106,7 @@ def main() -> None:
                 speech_model=args.speech_model,
                 box_clamp_tolerance_pixels=settings.box_clamp_tolerance_pixels,
                 audio_input_queue_capacity=settings.audio_input_queue_capacity,
+                event_publish_timeout=settings.event_publish_timeout,
             )
         else:
             run_live_preview(camera_index=camera_index, microphone_device=microphone_device)

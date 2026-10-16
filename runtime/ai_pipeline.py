@@ -14,10 +14,12 @@ import urllib.request
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from ai.observation import Observation, ObservationType, ObservationValidity
 from ai.scene import (
     InterpretationHypothesis,
     SceneObservation,
@@ -433,12 +435,74 @@ class LocalVisionAnalyzer:
                 ]
             )
 
+        scene_observations = [
+            Observation(
+                observation_type=ObservationType.OBJECT_CANDIDATE,
+                source="camera",
+                source_backend=detection.source_backend,
+                frame_id=self._frame_id,
+                monotonic_time=observed_at,
+                confidence=detection.confidence,
+                validity=ObservationValidity.VALID,
+                payload={
+                    "class_id": detection.class_id,
+                    "label": detection.label,
+                    "bounding_box": {
+                        "x_min": detection.box.x_min,
+                        "y_min": detection.box.y_min,
+                        "x_max": detection.box.x_max,
+                        "y_max": detection.box.y_max,
+                    },
+                },
+                tracking_hint=(
+                    str(detection.track_id) if detection.track_id is not None else None
+                ),
+                synthetic=detection.synthetic,
+            )
+            for detection in detection_frame.stable_detections
+        ]
+        validity_by_status = {
+            DetectionState.LOW_CONFIDENCE: ObservationValidity.LOW_CONFIDENCE,
+            DetectionState.UNSTABLE: ObservationValidity.UNSTABLE,
+            DetectionState.INVALID_BOX: ObservationValidity.INVALID,
+            DetectionState.REJECTED: ObservationValidity.REJECTED,
+        }
+        scene_observations.extend(
+            Observation(
+                observation_type=ObservationType.OBJECT_CANDIDATE,
+                source="camera",
+                source_backend=item.source_backend,
+                frame_id=item.frame_id,
+                monotonic_time=item.timestamp,
+                confidence=item.confidence if item.confidence is not None else 0.0,
+                validity=validity_by_status.get(item.status, ObservationValidity.UNKNOWN),
+                payload={
+                    "class_id": item.normalized_class_id,
+                    "label": item.label or "unknown",
+                    "bounding_box": (
+                        {
+                            "x_min": item.bounding_box.x_min,
+                            "y_min": item.bounding_box.y_min,
+                            "x_max": item.bounding_box.x_max,
+                            "y_max": item.bounding_box.y_max,
+                        }
+                        if item.bounding_box is not None
+                        else None
+                    ),
+                },
+                tracking_hint=str(item.tracking_id) if item.tracking_id is not None else None,
+                errors=item.validation_errors,
+                synthetic=item.synthetic,
+            )
+            for item in detection_frame.unverified_detections
+        )
         observation = SceneObservation(
             frame_id=self._frame_id,
             observed_at=observed_at,
             detections=detection_frame,
             action_cues=action_cues,
             face_features=face_features,
+            observations=tuple(scene_observations),
         )
         world_state = self._world_state_tracker.update(observation)
         tentative_interpretations = tentative_affect_hypotheses(
@@ -966,9 +1030,9 @@ def _queue_text_chat_message(
     return True
 
 
-def _publish_event(event_bus: EventBus, event: Event) -> None:
+def _publish_event(event_bus: EventBus, event: Event, timeout: float = 0.25) -> None:
     try:
-        event_bus.publish(event, block=False)
+        event_bus.publish(event, block=True, timeout=timeout)
     except EventBusFullError:
         logger.warning("Event bus is full; dropping local inference event %s.", event.event_type)
 
@@ -983,6 +1047,7 @@ def run_ai_live(
     speech_model: str = WHISPER_MODEL,
     box_clamp_tolerance_pixels: float = 2.0,
     audio_input_queue_capacity: int = 24,
+    event_publish_timeout: float = 0.25,
     on_status: Callable[[str], None] = print,
     on_event: Callable[[Event], None] | None = None,
 ) -> None:
@@ -1000,6 +1065,13 @@ def run_ai_live(
         raise ValueError("camera_index must be zero or greater.")
     if microphone_device is not None and microphone_device < 0:
         raise ValueError("microphone_device must be zero or greater.")
+    if (
+        isinstance(event_publish_timeout, bool)
+        or not isinstance(event_publish_timeout, (int, float))
+        or not isfinite(event_publish_timeout)
+        or event_publish_timeout <= 0
+    ):
+        raise ValueError("event_publish_timeout must be finite and greater than zero.")
     if (
         isinstance(audio_input_queue_capacity, bool)
         or not isinstance(audio_input_queue_capacity, int)
@@ -1135,6 +1207,7 @@ def run_ai_live(
                         "raw_audio_logged": False,
                     },
                 ),
+                timeout=event_publish_timeout,
             )
 
     def audio_callback(samples: Any, frames: int, timing: Any, status: Any) -> None:
@@ -1187,6 +1260,7 @@ def run_ai_live(
                             "laptop_microphone",
                             payload={"text": transcript, "local_inference": True},
                         ),
+                        timeout=event_publish_timeout,
                     )
                     try:
                         transcript_jobs.put(_ChatJob(transcript=transcript), timeout=0.5)
@@ -1341,6 +1415,7 @@ def run_ai_live(
                                 },
                                 confidence=snapshot.confidence,
                             ),
+                            timeout=event_publish_timeout,
                         )
                     if snapshot.action_cues and snapshot.action_cues != (
                         "person posture detected",
@@ -1356,6 +1431,7 @@ def run_ai_live(
                                 },
                                 confidence=0.6,
                             ),
+                            timeout=event_publish_timeout,
                         )
                     if snapshot.expression_cues:
                         _publish_event(
@@ -1370,6 +1446,7 @@ def run_ai_live(
                                 },
                                 confidence=0.5,
                             ),
+                            timeout=event_publish_timeout,
                         )
                     latest_vision_event_at = now
                 last_vision_at = now

@@ -31,6 +31,11 @@ class BackendInfo:
     execution_device: str
     external_program: bool
     network_required: bool
+    backend_id: str | None = None
+    model_name: str | None = None
+    model_source: str | None = None
+    loopback_only: bool = False
+    known_limitations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,11 @@ class ObjectDetector(Backend, Protocol):
 
 
 @runtime_checkable
+class PersonDetector(Backend, Protocol):
+    def infer(self, frame: Any, observed_at: float) -> Any: ...
+
+
+@runtime_checkable
 class PoseEstimator(Backend, Protocol):
     def infer(self, frame: Any, observed_at: float) -> Any: ...
 
@@ -91,6 +101,11 @@ class HandPoseEstimator(Backend, Protocol):
 @runtime_checkable
 class FaceFeatureExtractor(Backend, Protocol):
     def infer(self, frame: Any, observed_at: float) -> Any: ...
+
+
+@runtime_checkable
+class ObjectTracker(Backend, Protocol):
+    def infer(self, observations: Any, observed_at: float) -> Any: ...
 
 
 @runtime_checkable
