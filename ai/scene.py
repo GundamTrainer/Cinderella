@@ -44,6 +44,44 @@ class InterpretationHypothesis:
     requires_confirmation: bool = True
 
 
+def tentative_affect_hypotheses(
+    expression_cues: tuple[str, ...],
+    *,
+    observed_at: float,
+    lifetime_seconds: float = 2.0,
+) -> tuple[InterpretationHypothesis, ...]:
+    """Create low-confidence, short-lived hypotheses from explicit visible cues only."""
+    if not isfinite(observed_at) or not isfinite(lifetime_seconds) or lifetime_seconds <= 0:
+        raise ValueError("hypothesis time and lifetime must be finite; lifetime must be positive.")
+
+    cues = set(expression_cues)
+    patterns = (
+        ({"smile-like facial movement"}, "possible_positive_affect"),
+        (
+            {"eyebrow-raising movement", "eyes-widening movement"},
+            "possible_surprise_like_response",
+        ),
+        (
+            {"brow-lowering movement", "eyes-narrowing movement"},
+            "possible_tension_like_response",
+        ),
+    )
+    hypotheses = []
+    for required_cues, label in patterns:
+        if required_cues <= cues:
+            hypotheses.append(
+                InterpretationHypothesis(
+                    hypothesis=label,
+                    supporting_observations=tuple(sorted(required_cues)),
+                    confidence=0.25,
+                    uncertainty="high; heuristic and not calibrated",
+                    valid_until=observed_at + lifetime_seconds,
+                    requires_confirmation=True,
+                )
+            )
+    return tuple(hypotheses)
+
+
 class WorldStateTracker:
     """Build short-lived scene state from validated, temporally stable observations."""
 

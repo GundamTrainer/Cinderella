@@ -6,14 +6,18 @@ from types import SimpleNamespace
 import pytest
 
 from ai.contracts import BackendKind
-from ai.evaluation import evaluate_detections
+from ai.evaluation import (
+    DetectionBenchmarkSample,
+    evaluate_detection_benchmark,
+    evaluate_detections,
+)
 from ai.external_backends import (
     ExternalMediaPipeBackend,
     ExternalOllamaLanguageBackend,
     ExternalSapiSpeechBackend,
     ExternalWhisperBackend,
 )
-from ai.scene import SceneObservation, WorldStateTracker
+from ai.scene import SceneObservation, WorldStateTracker, tentative_affect_hypotheses
 from ai.vision import (
     BoundingBox,
     CoordinateSpace,
@@ -337,6 +341,21 @@ def test_world_state_rejects_out_of_order_observations() -> None:
         tracker.update(observation(0.5))
 
 
+def test_tentative_affect_hypothesis_is_low_confidence_and_requires_confirmation() -> None:
+    hypotheses = tentative_affect_hypotheses(
+        ("smile-like facial movement",),
+        observed_at=5.0,
+    )
+
+    assert len(hypotheses) == 1
+    assert hypotheses[0].hypothesis == "possible_positive_affect"
+    assert hypotheses[0].confidence == 0.25
+    assert hypotheses[0].uncertainty.startswith("high")
+    assert hypotheses[0].requires_confirmation
+    assert hypotheses[0].valid_until == 7.0
+    assert tentative_affect_hypotheses((), observed_at=5.0) == ()
+
+
 @pytest.mark.parametrize(
     ("category_name", "expected_objects"),
     (("person", ("person",)), ("", ()), ("unknown", ())),
@@ -522,6 +541,38 @@ def test_evaluation_matches_predictions_by_class_and_iou() -> None:
 
     assert (result.true_positives, result.false_positives, result.false_negatives) == (1, 0, 0)
     assert result.precision == result.recall == result.mean_matched_iou == 1.0
+
+
+def test_dataset_benchmark_aggregates_metrics_across_samples() -> None:
+    exact_box = BoundingBox(0.1, 0.1, 0.5, 0.5)
+    samples = (
+        DetectionBenchmarkSample(
+            "frame-1",
+            (DetectionResult(1, "book", 0.9, exact_box),),
+            ((1, exact_box),),
+        ),
+        DetectionBenchmarkSample("frame-2", (), ((2, exact_box),)),
+        DetectionBenchmarkSample(
+            "frame-3",
+            (DetectionResult(3, "cup", 0.8, exact_box),),
+            (),
+        ),
+    )
+
+    report = evaluate_detection_benchmark(samples)
+
+    assert report.samples_evaluated == 3
+    assert (report.true_positives, report.false_positives, report.false_negatives) == (1, 1, 1)
+    assert report.precision == pytest.approx(0.5)
+    assert report.recall == pytest.approx(0.5)
+    assert report.mean_matched_iou == pytest.approx(1.0)
+
+
+def test_dataset_benchmark_rejects_duplicate_sample_ids() -> None:
+    sample = DetectionBenchmarkSample("same-frame", (), ())
+
+    with pytest.raises(ValueError, match="unique"):
+        evaluate_detection_benchmark((sample, sample))
 
 
 def test_dataset_manifest_accepts_synthetic_non_media_metadata() -> None:

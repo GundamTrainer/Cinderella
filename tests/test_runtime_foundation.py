@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ai.scene import WorldState
 from runtime.ai_pipeline import (
     LocalSpeechRecognizer,
     OllamaChat,
@@ -23,16 +24,111 @@ from runtime.config import ConfigurationError, RuntimeSettings, load_runtime_set
 from runtime.event_bus import Event, EventBus, EventBusClosedError, EventBusFullError, EventType
 from runtime.laptop_io import LaptopDeviceError, _audio_rms
 from runtime.orchestrator import RuntimeOrchestrator
+from runtime.physical_ai import (
+    ActionProposal,
+    PhysicalAiSimulator,
+    SimulatedAction,
+    run_physical_ai_safety_demo,
+)
 from runtime.simulators import SimulatedAudioSource, SimulatedHardwareAdapter, SimulatedVisionSource
 
 
 def test_capability_overlay_reports_implementation_coverage_not_human_similarity() -> None:
-    assert implementation_coverage_percent() == 50
+    assert implementation_coverage_percent() == 54
     assert capability_overlay_lines() == (
-        "Feature implementation coverage: 50% (not human similarity)",
-        "Reply 50% | Situation 50% | Emotion 0% | Person 50%",
+        "Feature implementation coverage: 54% (not human similarity or accuracy)",
+        "Reply 50% | Situation 50% | Affect cues 25% | Person 50%",
         "Object 50% | Dialogue 100%",
     )
+
+
+def test_physical_ai_simulation_emits_proposal_safety_and_simulated_command() -> None:
+    bus = EventBus(8)
+    simulator = PhysicalAiSimulator(bus)
+    scene = WorldState(observed_at=1.0, objects=(), uncertain_labels=())
+    proposal = ActionProposal(
+        SimulatedAction.MOVE_FORWARD,
+        confidence=0.9,
+        reason="demonstration in empty synthetic scene",
+        distance_meters=0.05,
+    )
+
+    decision = simulator.process(proposal, scene)
+    events = bus.drain()
+
+    assert decision.approved
+    assert [event.event_type for event in events] == [
+        EventType.PLANNER_ACTION_PROPOSED,
+        EventType.SAFETY_ACTION_APPROVED,
+        EventType.HARDWARE_COMMAND_SIMULATED,
+    ]
+    assert events[-1].payload["synthetic"] is True
+    assert events[-1].payload["real_hardware_actuated"] is False
+
+
+def test_physical_ai_safety_gate_rejects_motion_when_scene_is_uncertain() -> None:
+    bus = EventBus(8)
+    simulator = PhysicalAiSimulator(bus)
+    scene = WorldState(
+        observed_at=1.0,
+        objects=(),
+        uncertain_labels=("unknown object",),
+    )
+    proposal = ActionProposal(
+        SimulatedAction.MOVE_FORWARD,
+        confidence=0.99,
+        reason="attempt motion",
+        distance_meters=0.05,
+    )
+
+    decision = simulator.process(proposal, scene)
+    events = bus.drain()
+
+    assert not decision.approved
+    assert decision.reason == "scene_not_confirmed_clear"
+    assert [event.event_type for event in events] == [
+        EventType.PLANNER_ACTION_PROPOSED,
+        EventType.SAFETY_ACTION_REJECTED,
+    ]
+
+
+def test_physical_ai_rejects_out_of_bounds_and_low_confidence_motion() -> None:
+    simulator = PhysicalAiSimulator(EventBus(8))
+    scene = WorldState(observed_at=1.0, objects=(), uncertain_labels=())
+
+    too_far = ActionProposal(
+        SimulatedAction.MOVE_FORWARD,
+        confidence=0.9,
+        reason="oversized test motion",
+        distance_meters=0.2,
+    )
+    low_confidence = ActionProposal(
+        SimulatedAction.MOVE_FORWARD,
+        confidence=0.4,
+        reason="uncertain test motion",
+        distance_meters=0.05,
+    )
+
+    assert simulator.evaluate(too_far, scene).reason == "simulated_distance_limit_exceeded"
+    assert simulator.evaluate(low_confidence, scene).reason == "confidence_below_safety_threshold"
+
+
+def test_physical_ai_demo_is_deterministic_and_never_actuates_hardware() -> None:
+    first = run_physical_ai_safety_demo(EventBus(8))
+    second = run_physical_ai_safety_demo(EventBus(8))
+
+    assert [event.event_type for event in first] == [
+        EventType.PLANNER_ACTION_PROPOSED,
+        EventType.SAFETY_ACTION_APPROVED,
+        EventType.HARDWARE_COMMAND_SIMULATED,
+        EventType.PLANNER_ACTION_PROPOSED,
+        EventType.SAFETY_ACTION_REJECTED,
+    ]
+    assert [(event.event_type, event.payload, event.confidence) for event in first] == [
+        (event.event_type, event.payload, event.confidence) for event in second
+    ]
+    assert all(event.payload["synthetic"] is True for event in first)
+    assert all(event.payload["real_hardware_actuated"] is False for event in first[1:])
 
 
 class DummyComponent(Component):
@@ -189,16 +285,22 @@ def test_partial_initialization_failure_closes_initialized_components() -> None:
     bus = EventBus(8)
     good = DummyComponent("good")
     bad = FailingComponent("bad")
-    orchestrator = RuntimeOrchestrator(RuntimeSettings.from_mapping({
-        "runtime_queue_capacity": 8,
-        "event_publish_timeout": 0.25,
-        "shutdown_timeout": 1.0,
-        "logging_level": "INFO",
-        "simulation_seed": 42,
-        "audio_simulator_enabled": True,
-        "vision_simulator_enabled": True,
-        "hardware_simulator_enabled": True,
-    }), bus=bus, components=[good, bad])
+    orchestrator = RuntimeOrchestrator(
+        RuntimeSettings.from_mapping(
+            {
+                "runtime_queue_capacity": 8,
+                "event_publish_timeout": 0.25,
+                "shutdown_timeout": 1.0,
+                "logging_level": "INFO",
+                "simulation_seed": 42,
+                "audio_simulator_enabled": True,
+                "vision_simulator_enabled": True,
+                "hardware_simulator_enabled": True,
+            }
+        ),
+        bus=bus,
+        components=[good, bad],
+    )
 
     with pytest.raises(RuntimeError, match="initialization failed"):
         orchestrator.initialize()
@@ -210,16 +312,18 @@ def test_shutdown_closes_all_components() -> None:
     bus = EventBus(16)
     first = DummyComponent("first")
     second = DummyComponent("second")
-    settings = RuntimeSettings.from_mapping({
-        "runtime_queue_capacity": 16,
-        "event_publish_timeout": 0.25,
-        "shutdown_timeout": 1.0,
-        "logging_level": "INFO",
-        "simulation_seed": 42,
-        "audio_simulator_enabled": True,
-        "vision_simulator_enabled": True,
-        "hardware_simulator_enabled": True,
-    })
+    settings = RuntimeSettings.from_mapping(
+        {
+            "runtime_queue_capacity": 16,
+            "event_publish_timeout": 0.25,
+            "shutdown_timeout": 1.0,
+            "logging_level": "INFO",
+            "simulation_seed": 42,
+            "audio_simulator_enabled": True,
+            "vision_simulator_enabled": True,
+            "hardware_simulator_enabled": True,
+        }
+    )
     orchestrator = RuntimeOrchestrator(settings, bus=bus, components=[first, second])
     orchestrator.initialize()
     orchestrator.start()
@@ -241,31 +345,35 @@ def test_runtime_settings_load_valid_file() -> None:
 
 def test_runtime_settings_reject_invalid_audio_queue_capacity() -> None:
     with pytest.raises(ConfigurationError, match="audio_input_queue_capacity"):
-        RuntimeSettings.from_mapping({
-            "runtime_queue_capacity": 128,
-            "event_publish_timeout": 0.25,
-            "shutdown_timeout": 2.0,
-            "logging_level": "INFO",
-            "simulation_seed": 42,
-            "audio_simulator_enabled": True,
-            "vision_simulator_enabled": True,
-            "hardware_simulator_enabled": True,
-            "audio_input_queue_capacity": 0,
-        })
+        RuntimeSettings.from_mapping(
+            {
+                "runtime_queue_capacity": 128,
+                "event_publish_timeout": 0.25,
+                "shutdown_timeout": 2.0,
+                "logging_level": "INFO",
+                "simulation_seed": 42,
+                "audio_simulator_enabled": True,
+                "vision_simulator_enabled": True,
+                "hardware_simulator_enabled": True,
+                "audio_input_queue_capacity": 0,
+            }
+        )
 
 
 def test_runtime_settings_reject_invalid_values() -> None:
     with pytest.raises(ConfigurationError, match="runtime_queue_capacity"):
-        RuntimeSettings.from_mapping({
-            "runtime_queue_capacity": 0,
-            "event_publish_timeout": 0.25,
-            "shutdown_timeout": 1.0,
-            "logging_level": "INFO",
-            "simulation_seed": 42,
-            "audio_simulator_enabled": True,
-            "vision_simulator_enabled": True,
-            "hardware_simulator_enabled": True,
-        })
+        RuntimeSettings.from_mapping(
+            {
+                "runtime_queue_capacity": 0,
+                "event_publish_timeout": 0.25,
+                "shutdown_timeout": 1.0,
+                "logging_level": "INFO",
+                "simulation_seed": 42,
+                "audio_simulator_enabled": True,
+                "vision_simulator_enabled": True,
+                "hardware_simulator_enabled": True,
+            }
+        )
 
 
 def test_audio_rms_handles_empty_and_silent_buffers() -> None:
@@ -285,7 +393,9 @@ def test_audio_rms_handles_empty_and_silent_buffers() -> None:
     assert _audio_rms(Samples([1.0, 1.0, 1.0, 1.0])) == 1.0
 
 
-def test_live_preview_requires_optional_hardware_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_preview_requires_optional_hardware_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from runtime import laptop_io
 
     original_import_module = laptop_io.importlib.import_module
@@ -381,6 +491,25 @@ def test_face_analysis_reports_movement_not_emotional_state() -> None:
     assert "happy" not in cues
 
 
+def test_chat_prompt_treats_affect_hypotheses_as_uncertain_and_confirmable() -> None:
+    chat = OllamaChat()
+    perception = PerceptionSnapshot(
+        tentative_interpretations=(
+            SimpleNamespace(
+                hypothesis="possible_positive_affect",
+                confidence=0.25,
+            ),
+        )
+    )
+
+    context = perception.prompt_context()
+
+    assert "감정 관련 가설(낮은 확신, 확인 필요)" in context
+    assert "confirmation required" in context
+    assert "검증되지 않은 낮은 확신의 가설" in chat._system
+    assert "사용자가 직접 확인" in chat._system
+
+
 def test_speech_recognizer_resamples_to_whisper_sample_rate() -> None:
     class FakeModel:
         received_length = 0
@@ -399,7 +528,9 @@ def test_speech_recognizer_resamples_to_whisper_sample_rate() -> None:
     assert fake_model.received_length == 16_000
 
 
-def test_local_chat_sends_only_transcript_and_textual_perception(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_local_chat_sends_only_transcript_and_textual_perception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = OllamaChat()
     sent_payloads: list[dict[str, object]] = []
 
@@ -441,7 +572,9 @@ def test_local_chat_rejects_non_loopback_endpoints(base_url: str) -> None:
         OllamaChat(base_url=base_url)
 
 
-def test_local_chat_uses_current_image_without_retaining_it(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_local_chat_uses_current_image_without_retaining_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat = OllamaChat()
     sent_payloads: list[dict[str, object]] = []
 

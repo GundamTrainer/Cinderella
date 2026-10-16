@@ -24,7 +24,13 @@ from ai.external_backends import (
     ExternalSapiSpeechBackend,
     ExternalWhisperBackend,
 )
-from ai.scene import SceneObservation, WorldState, WorldStateTracker
+from ai.scene import (
+    InterpretationHypothesis,
+    SceneObservation,
+    WorldState,
+    WorldStateTracker,
+    tentative_affect_hypotheses,
+)
 from ai.vision import (
     DetectionFrame,
     DetectionStabilizer,
@@ -84,6 +90,7 @@ class PerceptionSnapshot:
     face_features: FaceFeatureFrame | None = None
     observation: SceneObservation | None = None
     world_state: WorldState | None = None
+    tentative_interpretations: tuple[InterpretationHypothesis, ...] = ()
 
     def prompt_context(self) -> str:
         scene = (
@@ -98,13 +105,22 @@ class PerceptionSnapshot:
             if self.world_state and self.world_state.uncertain_labels
             else "none"
         )
+        tentative = (
+            "; ".join(
+                f"{item.hypothesis} ({item.confidence:.2f}, confirmation required)"
+                for item in self.tentative_interpretations
+            )
+            if self.tentative_interpretations
+            else "none"
+        )
         return (
             "카메라 영상 관찰 단서(불확실할 수 있으며 감정·의도의 확정 판정이 아님): "
             f"물체={', '.join(self.objects) if self.objects else '없음/미검출'}, "
             f"시간적 장면 상태={scene}, 미확정 후보={uncertain}, "
             f"자세·행동 단서={', '.join(self.action_cues) if self.action_cues else '없음/미검출'}, "
             f"얼굴 감지={'예' if self.face_detected else '아니오'}, "
-            f"얼굴 움직임 단서={', '.join(self.expression_cues) if self.expression_cues else '없음/미검출'}."
+            f"얼굴 움직임 단서={', '.join(self.expression_cues) if self.expression_cues else '없음/미검출'}, "
+            f"감정 관련 가설(낮은 확신, 확인 필요)={tentative}."
         )
 
 
@@ -436,6 +452,10 @@ class LocalVisionAnalyzer:
             face_features=face_features,
         )
         world_state = self._world_state_tracker.update(observation)
+        tentative_interpretations = tentative_affect_hypotheses(
+            expression_cues,
+            observed_at=observed_at,
+        )
         return PerceptionSnapshot(
             objects=tuple(objects),
             action_cues=action_cues,
@@ -446,6 +466,7 @@ class LocalVisionAnalyzer:
             face_features=face_features,
             observation=observation,
             world_state=world_state,
+            tentative_interpretations=tentative_interpretations,
         )
 
     def close(self) -> None:
@@ -568,6 +589,8 @@ class OllamaChat:
             "한국어 해요체로 보통 한두 문장만 말하고, 불필요한 질문이나 반복을 피해야 해. "
             "정해지지 않은 캐릭터 성격을 임의로 만들거나 사람인 척하지 마. "
             "얼굴이나 목소리만으로 감정·의도·신원·건강을 단정하지 마. "
+            "감정 관련 단서는 검증되지 않은 낮은 확신의 가설일 뿐이야. "
+            "감정을 사실처럼 말하지 말고, 꼭 필요하면 사용자가 직접 확인할 수 있도록 조심스럽게 질문해. "
             "카메라 질문에는 첨부된 이미지를 직접 확인하고, 자동 검출이 놓쳤을 수 있어. "
             "확실하지 않은 물체는 지어내지 말고 불확실하다고 말해."
         )
@@ -1411,6 +1434,15 @@ def run_ai_live(
                 f"Objects: {', '.join(snapshot.objects) or 'none detected'}",
                 f"Pose cues: {', '.join(snapshot.action_cues) or 'none detected'}",
                 f"Expression cues (not emotion): {', '.join(snapshot.expression_cues) or 'none detected'}",
+                (
+                    "Tentative affect: "
+                    + (
+                        ", ".join(item.hypothesis for item in snapshot.tentative_interpretations)
+                        if snapshot.tentative_interpretations
+                        else "none"
+                    )
+                    + " (unverified)"
+                ),
             ]
             for index, line in enumerate(lines):
                 cv2.putText(

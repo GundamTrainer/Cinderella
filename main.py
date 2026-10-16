@@ -7,6 +7,7 @@ from runtime.ai_pipeline import CHAT_MODEL, VISION_CHAT_MODEL, LocalInferenceErr
 from runtime.config import load_runtime_settings
 from runtime.event_bus import EventBus
 from runtime.laptop_io import LaptopDeviceError, list_audio_inputs, list_cameras, run_live_preview
+from runtime.physical_ai import run_physical_ai_safety_demo
 
 PROJECT_NAME = "Cinderella"
 PROJECT_VERSION = "0.1.0"
@@ -28,6 +29,11 @@ def _parse_args() -> argparse.Namespace:
         "--preview",
         action="store_true",
         help="Open a camera and microphone level preview without model inference.",
+    )
+    parser.add_argument(
+        "--physical-ai-demo",
+        action="store_true",
+        help="Run a deterministic physical-AI action/safety simulation without hardware.",
     )
     parser.add_argument("--camera-index", type=int, help="Camera index (default from config).")
     parser.add_argument(
@@ -57,7 +63,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     print(f"{PROJECT_NAME} v{PROJECT_VERSION}")
-    if not args.live and not args.preview and not args.devices:
+    if not args.live and not args.preview and not args.devices and not args.physical_ai_demo:
         print("Development environment initialized.")
         print(
             "Use --devices to check hardware, --preview for device checks, or --live for local AI."
@@ -80,6 +86,10 @@ def main() -> None:
                 return
 
         settings = load_runtime_settings()
+        if args.physical_ai_demo:
+            for event in run_physical_ai_safety_demo(EventBus(settings.runtime_queue_capacity)):
+                print(event.to_json())
+            return
         camera_index = settings.camera_index if args.camera_index is None else args.camera_index
         microphone_device = (
             settings.microphone_device if args.microphone_device is None else args.microphone_device
