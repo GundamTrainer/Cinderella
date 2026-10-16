@@ -8,3 +8,5 @@ vision_simulator_enabled: true
 hardware_simulator_enabled: true
 camera_index: 0
 microphone_device: null
+box_clamp_tolerance_pixels: 2.0
+audio_input_queue_capacity: 24

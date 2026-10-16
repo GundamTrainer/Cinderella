@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,15 +24,16 @@ from ai.external_backends import (
     ExternalSapiSpeechBackend,
     ExternalWhisperBackend,
 )
+from ai.scene import SceneObservation, WorldState, WorldStateTracker
 from ai.vision import (
-    BoundingBox,
     DetectionFrame,
-    DetectionResult,
     DetectionStabilizer,
     DetectionState,
     FaceFeatureFrame,
     FaceFeatureStabilizer,
+    convert_detector_results,
 )
+from runtime.audio_stream import AudioInputBuffer
 
 from .event_bus import Event, EventBus, EventBusFullError, EventType
 
@@ -79,11 +81,26 @@ class PerceptionSnapshot:
     face_detected: bool = False
     detections: DetectionFrame | None = None
     face_features: FaceFeatureFrame | None = None
+    observation: SceneObservation | None = None
+    world_state: WorldState | None = None
 
     def prompt_context(self) -> str:
+        scene = (
+            "; ".join(
+                f"{item.label} at {item.region}, {item.motion}" for item in self.world_state.objects
+            )
+            if self.world_state and self.world_state.objects
+            else "no stable objects"
+        )
+        uncertain = (
+            ", ".join(self.world_state.uncertain_labels)
+            if self.world_state and self.world_state.uncertain_labels
+            else "none"
+        )
         return (
             "카메라 영상 관찰 단서(불확실할 수 있으며 감정·의도의 확정 판정이 아님): "
             f"물체={', '.join(self.objects) if self.objects else '없음/미검출'}, "
+            f"시간적 장면 상태={scene}, 미확정 후보={uncertain}, "
             f"자세·행동 단서={', '.join(self.action_cues) if self.action_cues else '없음/미검출'}, "
             f"얼굴 감지={'예' if self.face_detected else '아니오'}, "
             f"얼굴 움직임 단서={', '.join(self.expression_cues) if self.expression_cues else '없음/미검출'}."
@@ -155,7 +172,10 @@ def _ensure_model_asset(filename: str) -> Path:
         request = urllib.request.Request(
             MODEL_ASSETS[filename], headers={"User-Agent": "Cinderella-local-runtime/0.1"}
         )
-        with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+        with (
+            urllib.request.urlopen(request, timeout=60) as response,
+            temporary.open("wb") as output,
+        ):
             while chunk := response.read(1024 * 1024):
                 output.write(chunk)
         if temporary.stat().st_size == 0:
@@ -224,7 +244,7 @@ def facial_expression_cues(categories: list[Any]) -> tuple[str, ...]:
 class LocalVisionAnalyzer:
     """CPU-friendly local object, pose, and facial-movement analysis."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, box_clamp_tolerance_pixels: float = 2.0) -> None:
         try:
             import cv2
             import mediapipe as mp
@@ -252,6 +272,11 @@ class LocalVisionAnalyzer:
             minimum_stable_duration=0.25,
             missing_tolerance_frames=2,
         )
+        self._box_clamp_tolerance_pixels = box_clamp_tolerance_pixels
+        self._frame_id = 0
+        self._diagnostic_totals: Counter[str] = Counter()
+        self._diagnostic_log_milestones: dict[str, int] = {}
+        self._world_state_tracker = WorldStateTracker()
         try:
             self._object_detector = vision.ObjectDetector.create_from_options(
                 vision.ObjectDetectorOptions(
@@ -286,8 +311,16 @@ class LocalVisionAnalyzer:
                 )
             )
         except Exception as exc:
-            self.close()
-            raise LocalInferenceError(f"Could not initialize MediaPipe vision models: {exc}") from exc
+            try:
+                self.close()
+            except Exception as cleanup_error:  # noqa: BLE001 - preserve both failures
+                raise ExceptionGroup(
+                    "Could not initialize MediaPipe models and cleanup also failed.",
+                    [exc, cleanup_error],
+                ) from exc
+            raise LocalInferenceError(
+                f"Could not initialize MediaPipe vision models: {exc}"
+            ) from exc
 
     def analyze(self, frame: Any, timestamp_ms: int) -> PerceptionSnapshot:
         rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
@@ -298,39 +331,46 @@ class LocalVisionAnalyzer:
 
         height, width = frame.shape[:2]
         observed_at = timestamp_ms / 1000.0
-        raw_detections: list[DetectionResult] = []
-        for detection in object_result.detections:
-            if detection.categories:
-                category = detection.categories[0]
-                box = detection.bounding_box
-                try:
-                    normalized_box = BoundingBox(
-                        box.origin_x / width,
-                        box.origin_y / height,
-                        (box.origin_x + box.width) / width,
-                        (box.origin_y + box.height) / height,
-                    )
-                    class_id = int(category.index)
-                    label = str(category.category_name or "unknown")
-                    state = (
-                        DetectionState.CANDIDATE
-                        if class_id in range(80)
-                        else DetectionState.UNSUPPORTED_CLASS
-                    )
-                    raw_detections.append(
-                        DetectionResult(
-                            class_id,
-                            label,
-                            float(category.score),
-                            normalized_box,
-                            state,
-                        )
-                    )
-                except (AttributeError, TypeError, ValueError) as exc:
-                    logger.warning("Rejected invalid object detector result: %s", exc)
+        self._frame_id += 1
+        conversion = convert_detector_results(
+            object_result.detections,
+            frame_id=self._frame_id,
+            timestamp=observed_at,
+            image_width=width,
+            image_height=height,
+            source_backend="mediapipe",
+            minimum_confidence=self._detection_stabilizer.minimum_confidence,
+            supported_class_ids=self._detection_stabilizer.supported_class_ids,
+            clamp_tolerance_pixels=self._box_clamp_tolerance_pixels,
+        )
+        self._diagnostic_totals.update(dict(conversion.diagnostics))
+        report_reasons: list[str] = []
+        for reason, _ in conversion.diagnostics:
+            total = self._diagnostic_totals[reason]
+            milestone = self._diagnostic_log_milestones.get(reason, 1)
+            if total >= milestone:
+                report_reasons.append(reason)
+                while milestone <= total:
+                    milestone *= 10
+                self._diagnostic_log_milestones[reason] = milestone
+        if report_reasons:
+            logger.warning(
+                "Object detector diagnostics reached reporting milestones.",
+                extra={
+                    "frame_id": self._frame_id,
+                    "diagnostic_reasons": report_reasons,
+                    "cumulative_diagnostics": {
+                        reason: self._diagnostic_totals[reason] for reason in report_reasons
+                    },
+                },
+            )
         detection_frame = self._detection_stabilizer.update(
-            raw_detections,
+            conversion.detections,
             observed_at=observed_at,
+            frame_id=self._frame_id,
+            source_backend="mediapipe",
+            unverified_detections=conversion.unverified,
+            diagnostics=conversion.diagnostics,
         )
         objects = tuple(
             detection.label
@@ -387,6 +427,14 @@ class LocalVisionAnalyzer:
                 ]
             )
 
+        observation = SceneObservation(
+            frame_id=self._frame_id,
+            observed_at=observed_at,
+            detections=detection_frame,
+            action_cues=action_cues,
+            face_features=face_features,
+        )
+        world_state = self._world_state_tracker.update(observation)
         return PerceptionSnapshot(
             objects=tuple(objects),
             action_cues=action_cues,
@@ -395,14 +443,26 @@ class LocalVisionAnalyzer:
             face_detected=face_count == 1,
             detections=detection_frame,
             face_features=face_features,
+            observation=observation,
+            world_state=world_state,
         )
 
     def close(self) -> None:
-        for task in (self._face_landmarker, self._pose_landmarker, self._object_detector):
+        errors: list[Exception] = []
+        for name in ("_face_landmarker", "_pose_landmarker", "_object_detector"):
+            task = getattr(self, name)
             if task is not None:
-                task.close()
+                try:
+                    task.close()
+                except Exception as exc:  # noqa: BLE001 - continue closing remaining tasks
+                    errors.append(exc)
+                finally:
+                    setattr(self, name, None)
         self._detection_stabilizer.reset()
         self._face_stabilizer.reset()
+        self._world_state_tracker.reset()
+        if errors:
+            raise ExceptionGroup("One or more MediaPipe tasks failed to close.", errors)
 
 
 def _smooth_blendshapes(
@@ -436,11 +496,13 @@ class LocalSpeechRecognizer:
             cpu_threads=4,
             download_root=str(model_cache_directory() / "whisper"),
         )
+        self.last_rejection_reason: str | None = None
 
     def transcribe(self, samples: Any, sample_rate: int) -> str:
         if sample_rate <= 0:
             raise ValueError("sample_rate must be greater than zero.")
         if len(samples) == 0:
+            self.last_rejection_reason = "speech_not_detected"
             return ""
         import numpy as np
 
@@ -449,6 +511,7 @@ class LocalSpeechRecognizer:
         if sample_rate != target_rate:
             output_size = round(len(audio) * target_rate / sample_rate)
             if output_size == 0:
+                self.last_rejection_reason = "speech_not_detected"
                 return ""
             source_positions = np.arange(len(audio), dtype=np.float64)
             target_positions = np.arange(output_size, dtype=np.float64) * sample_rate / target_rate
@@ -460,7 +523,9 @@ class LocalSpeechRecognizer:
             condition_on_previous_text=False,
             beam_size=3,
         )
-        return "".join(segment.text for segment in segments).strip()
+        transcript = "".join(segment.text for segment in segments).strip()
+        self.last_rejection_reason = None if transcript else "speech_not_detected"
+        return transcript
 
 
 class OllamaChat:
@@ -562,11 +627,7 @@ class OllamaChat:
         )
         user_message: dict[str, Any] = {
             "role": "user",
-            "content": (
-                context
-                if use_vision_model
-                else f"{context}\n\n사용자 발화: {transcript}"
-            ),
+            "content": (context if use_vision_model else f"{context}\n\n사용자 발화: {transcript}"),
         }
         request_message = dict(user_message)
         if images:
@@ -728,9 +789,7 @@ class ProactiveConversationScheduler:
     @staticmethod
     def _signature(perception: PerceptionSnapshot) -> tuple[str, ...]:
         return tuple(
-            sorted(
-                (*perception.objects, *perception.action_cues, *perception.expression_cues)
-            )
+            sorted((*perception.objects, *perception.action_cues, *perception.expression_cues))
         )
 
     def mark_activity(self, *, now: float | None = None) -> None:
@@ -791,7 +850,9 @@ class LocalVoiceOutput:
         if not self._ready.wait(timeout=15):
             raise LocalInferenceError("Timed out initializing the offline Korean speech voice.")
         if self._error is not None:
-            raise LocalInferenceError(f"Could not initialize offline Korean speech: {self._error}") from self._error
+            raise LocalInferenceError(
+                f"Could not initialize offline Korean speech: {self._error}"
+            ) from self._error
 
     def _run(self) -> None:
         try:
@@ -920,6 +981,8 @@ def run_ai_live(
     chat_model: str = CHAT_MODEL,
     vision_model: str = VISION_CHAT_MODEL,
     speech_model: str = WHISPER_MODEL,
+    box_clamp_tolerance_pixels: float = 2.0,
+    audio_input_queue_capacity: int = 24,
     on_status: Callable[[str], None] = print,
     on_event: Callable[[Event], None] | None = None,
 ) -> None:
@@ -937,9 +1000,17 @@ def run_ai_live(
         raise ValueError("camera_index must be zero or greater.")
     if microphone_device is not None and microphone_device < 0:
         raise ValueError("microphone_device must be zero or greater.")
+    if (
+        isinstance(audio_input_queue_capacity, bool)
+        or not isinstance(audio_input_queue_capacity, int)
+        or audio_input_queue_capacity <= 0
+    ):
+        raise ValueError("audio_input_queue_capacity must be positive.")
 
-    on_status("Loading local speech and vision models. First launch may download several model files.")
-    vision = ExternalMediaPipeBackend()
+    on_status(
+        "Loading local speech and vision models. First launch may download several model files."
+    )
+    vision = ExternalMediaPipeBackend(box_clamp_tolerance_pixels=box_clamp_tolerance_pixels)
     speech = ExternalWhisperBackend(speech_model)
     chat = ExternalOllamaLanguageBackend(chat_model, vision_model)
     voice = ExternalSapiSpeechBackend()
@@ -975,7 +1046,9 @@ def run_ai_live(
         capture = cv2.VideoCapture(camera_index)
     except Exception as exc:
         cleanup_after_error(exc)
-        raise LocalInferenceError(f"Could not initialize camera index {camera_index}: {exc}") from exc
+        raise LocalInferenceError(
+            f"Could not initialize camera index {camera_index}: {exc}"
+        ) from exc
     if not capture.isOpened():
         capture.release()
         error = LocalInferenceError(
@@ -995,14 +1068,16 @@ def run_ai_live(
             raise LocalInferenceError("No microphone input device is available.")
         if microphone_device is None:
             default_input = sd.default.device[0]
-            selected_device = (
-                default_input if default_input in input_devices else input_devices[0]
-            )
+            selected_device = default_input if default_input in input_devices else input_devices[0]
         else:
             selected_device = microphone_device
             if selected_device not in input_devices:
-                raise LocalInferenceError(f"Microphone input index {selected_device} is not available.")
+                raise LocalInferenceError(
+                    f"Microphone input index {selected_device} is not available."
+                )
         sample_rate = int(sd.query_devices(selected_device, "input")["default_samplerate"])
+        if sample_rate <= 0:
+            raise LocalInferenceError("Microphone sample rate must be greater than zero.")
     except LocalInferenceError as exc:
         capture.release()
         cleanup_after_error(exc)
@@ -1022,7 +1097,7 @@ def run_ai_live(
         cleanup_after_error(exc)
         raise
 
-    audio_chunks: queue.Queue[Any] = queue.Queue(maxsize=24)
+    audio_chunks = AudioInputBuffer(capacity=audio_input_queue_capacity)
     transcript_jobs: queue.Queue[_ChatJob | None] = queue.Queue(maxsize=4)
     stopping = threading.Event()
     barge_in = threading.Event()
@@ -1030,38 +1105,73 @@ def run_ai_live(
     scheduler = ProactiveConversationScheduler()
     latest_vision_event_at = 0.0
 
+    def publish_audio_diagnostics() -> None:
+        event_types = {
+            "audio.frame_dropped": EventType.AUDIO_FRAME_DROPPED,
+            "audio.input_overflow": EventType.AUDIO_INPUT_OVERFLOW,
+            "audio.queue_pressure": EventType.AUDIO_QUEUE_PRESSURE,
+            "audio.segment_accepted": EventType.AUDIO_SEGMENT_ACCEPTED,
+            "audio.segment_rejected": EventType.AUDIO_SEGMENT_REJECTED,
+        }
+        for diagnostic, count in audio_chunks.drain_diagnostics().items():
+            event_name, separator, reason = diagnostic.partition(":")
+            event_type = event_types.get(event_name)
+            if event_type is None:
+                raise RuntimeError(f"Unsupported audio diagnostic: {diagnostic}")
+            _publish_event(
+                event_bus,
+                Event.create(
+                    event_type,
+                    "laptop_microphone",
+                    payload={
+                        "count": count,
+                        **({"reason": reason} if separator else {}),
+                        "raw_audio_logged": False,
+                    },
+                ),
+            )
+
     def audio_callback(samples: Any, frames: int, timing: Any, status: Any) -> None:
         del frames, timing
-        if status:
-            logger.warning("Microphone stream status: %s", status)
         if voice.is_speaking:
             level = float(np.sqrt(np.mean(np.square(samples))))
             if voice.observe_microphone_level(level):
                 barge_in.set()
+            audio_chunks.discard(
+                frame_count=len(samples),
+                status=status,
+                reason="tts_echo_guard",
+            )
             return
-        try:
-            audio_chunks.put_nowait(samples.copy())
-        except queue.Full:
-            logger.warning("Audio inference queue is full; dropping a microphone buffer.")
+        audio_chunks.submit(samples, frame_count=len(samples), status=status)
 
     def transcribe_worker() -> None:
         buffered: list[Any] = []
         sample_count = 0
         target_count = sample_rate * SPEECH_WINDOW_SECONDS
+        last_sequence_number: int | None = None
         while not stopping.is_set():
             try:
                 chunk = audio_chunks.get(timeout=0.25)
             except queue.Empty:
                 continue
-            if chunk is None:
-                break
-            buffered.append(chunk)
-            sample_count += len(chunk)
+            if chunk.input_overflow or (
+                last_sequence_number is not None
+                and chunk.sequence_number != last_sequence_number + 1
+            ):
+                if buffered:
+                    audio_chunks.record_segment(accepted=False, reason="queue_gap")
+                buffered = []
+                sample_count = 0
+            last_sequence_number = chunk.sequence_number
+            buffered.append(chunk.samples)
+            sample_count += chunk.frame_count
             if sample_count < target_count:
                 continue
             try:
                 transcript = speech.infer(np.concatenate(buffered), sample_rate)
                 if transcript:
+                    audio_chunks.record_segment(accepted=True)
                     state.update_transcript(transcript)
                     scheduler.mark_activity()
                     _publish_event(
@@ -1075,9 +1185,17 @@ def run_ai_live(
                     try:
                         transcript_jobs.put(_ChatJob(transcript=transcript), timeout=0.5)
                     except queue.Full:
-                        logger.warning("Conversation queue is full; dropping a recognized utterance.")
+                        logger.warning(
+                            "Conversation queue is full; dropping a recognized utterance."
+                        )
+                else:
+                    audio_chunks.record_segment(
+                        accepted=False,
+                        reason=getattr(speech, "last_rejection_reason", None) or "unknown",
+                    )
             except Exception:
                 logger.exception("Local speech transcription failed.")
+                audio_chunks.record_segment(accepted=False, reason="inference_error")
             buffered = []
             sample_count = 0
 
@@ -1179,7 +1297,9 @@ def run_ai_live(
                     [cv2.IMWRITE_JPEG_QUALITY, 72],
                 )
                 if not encoded_ok:
-                    raise LocalInferenceError("Could not encode a camera frame for local visual chat.")
+                    raise LocalInferenceError(
+                        "Could not encode a camera frame for local visual chat."
+                    )
                 state.update_image(encoded_frame.tobytes())
                 if now - latest_vision_event_at >= 1.0:
                     if snapshot.objects:
@@ -1203,7 +1323,11 @@ def run_ai_live(
                                                 "y_max": detection.box.y_max,
                                             },
                                         }
-                                        for detection in (snapshot.detections.stable_detections if snapshot.detections else ())
+                                        for detection in (
+                                            snapshot.detections.stable_detections
+                                            if snapshot.detections
+                                            else ()
+                                        )
                                         if detection.state == DetectionState.STABLE
                                     ],
                                     "local_inference": True,
@@ -1211,7 +1335,9 @@ def run_ai_live(
                                 confidence=snapshot.confidence,
                             ),
                         )
-                    if snapshot.action_cues and snapshot.action_cues != ("person posture detected",):
+                    if snapshot.action_cues and snapshot.action_cues != (
+                        "person posture detected",
+                    ):
                         _publish_event(
                             event_bus,
                             Event.create(
@@ -1241,6 +1367,8 @@ def run_ai_live(
                     latest_vision_event_at = now
                 last_vision_at = now
 
+            publish_audio_diagnostics()
+
             if barge_in.is_set():
                 voice.interrupt()
                 scheduler.mark_activity()
@@ -1251,9 +1379,7 @@ def run_ai_live(
             proactive_reason = scheduler.next_reason(snapshot, now=now)
             if proactive_reason is not None:
                 try:
-                    transcript_jobs.put_nowait(
-                        _ChatJob(proactive_reason=proactive_reason)
-                    )
+                    transcript_jobs.put_nowait(_ChatJob(proactive_reason=proactive_reason))
                 except queue.Full:
                     logger.warning("Conversation queue is full; postponing proactive speech.")
                 else:
@@ -1314,26 +1440,32 @@ def run_ai_live(
                     stream.close()
         finally:
             try:
-                for work_queue in (audio_chunks, transcript_jobs):
+                for work_queue in (transcript_jobs,):
                     try:
                         work_queue.put_nowait(None)
                     except queue.Full:
-                        logger.warning("Worker queue is full while stopping; worker will exit after timeout.")
+                        logger.warning(
+                            "Worker queue is full while stopping; worker will exit after timeout."
+                        )
                 for worker in workers:
                     if worker.is_alive():
                         worker.join(timeout=5)
                         if worker.is_alive():
                             logger.warning(
-                                "Worker %s is still finishing inference during shutdown.", worker.name
+                                "Worker %s is still finishing inference during shutdown.",
+                                worker.name,
                             )
             finally:
                 try:
-                    capture.release()
+                    publish_audio_diagnostics()
                 finally:
                     try:
-                        cv2.destroyAllWindows()
+                        capture.release()
                     finally:
-                        close_backends()
+                        try:
+                            cv2.destroyAllWindows()
+                        finally:
+                            close_backends()
 
 
 def _visual_chat_frame(cv2: Any, frame: Any) -> Any:

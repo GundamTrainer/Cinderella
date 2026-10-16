@@ -12,8 +12,9 @@ Implemented:
 - deterministic simulation components for audio, vision, and hardware
 - runtime orchestrator with cleanup on partial initialization failure
 - optional laptop camera/microphone preview
-- opt-in local Whisper transcription, MediaPipe object/pose/face-movement inference, local image-aware Ollama conversation, and offline Korean speech output, isolated behind explicit backend contracts/adapters
-- normalized object boxes with confidence filtering and temporal stabilization; face movement features are normalized and stabilized before cues are exposed
+- opt-in local Whisper transcription, MediaPipe object/pose/face-movement inference, local image-aware Ollama conversation, and offline Korean speech output, with external-backend provenance adapters; concrete model implementations are not yet fully separated from the live pipeline
+- validated object observations that distinguish invalid, unsupported, low-confidence, and unstable results; normalized boxes are clamped only within a small frame-edge tolerance and stable labels require repeated detections. This improves result handling and consistency, not detector accuracy.
+- short-lived world-state observations with coarse object regions and motion cues, plus bounded microphone buffering with overflow, drop, queue-pressure, and segment diagnostics
 - object-detection annotation validation and a basic class-aware IoU evaluation helper
 - quiet-pause and stable visual-cue conversation prompts, with basic speech-interruption detection
 - pytest coverage for the runtime foundation

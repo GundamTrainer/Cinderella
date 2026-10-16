@@ -16,9 +16,14 @@ __pycache__/
 .v*code/
 
 # Training datasets
-dataset*/
+/dataset/
 recordings/
 captures/
+datasets/**/raw/
+datasets/**/processed/
+datasets/**/annotations/
+datasets/**/exports/
+datasets/**/images/
 
 # AI mode*s and checkpoints
 checkpoints/
@@ -58,6 +63,10 @@ cache/
 *.onnx
 *.gguf
 *.safetensors
+*.tflite
+*.task
+*.bin
+*.model
 
 # Private configuration
 .env

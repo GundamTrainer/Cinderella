@@ -36,6 +36,8 @@ During live mode, type into the terminal and press Enter to chat. Responses are 
 
 The first run fetches the Whisper `small` weights and MediaPipe task assets to the user's cache. This is setup-time network access; subsequent inference is local.
 
+The default settings are in `configs/default.yaml`. `box_clamp_tolerance_pixels` bounds how far detector boxes may exceed the camera frame before rejection; `audio_input_queue_capacity` limits callback-to-worker buffering. Invalid or unsupported detections stay unverified, and repeated object observations are required before a label is exposed as stable. This validation/stabilization layer does not improve the pretrained detector's underlying accuracy.
+
 AI chat communicates only with the local Ollama service over loopback. Regular conversation uses the text model. When the recognized utterance or typed message asks about the camera view, the vision model receives a temporary JPEG thumbnail (maximum 448 pixels on its longest side); that image is not retained in conversation history or written to disk. Visual answers can be slow on CPU-only systems. Real-time object labels still use MediaPipe EfficientDet Lite2 and are limited to its COCO categories; use an explicit visual question to ask the local vision-language model about a scene. Speech is produced with the Korean voice installed in Windows; no audio is sent to a speech service. The conversation scheduler waits at least a minute after activity and uses jittered quiet intervals or stable visible cues; it does not infer mood. Basic interruption detection compares sustained mic input with initial speaker echo, so headphones are recommended.
 
 ## Model sources

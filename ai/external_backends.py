@@ -14,6 +14,7 @@ class ExternalBackendAdapter:
         *,
         model_version: str | None,
         checkpoint_source: str | None,
+        uses_pretrained_weights: bool | None,
         execution_device: str,
         external_program: bool,
         network_required: bool,
@@ -23,6 +24,7 @@ class ExternalBackendAdapter:
             kind=BackendKind.EXTERNAL,
             model_version=model_version,
             checkpoint_source=checkpoint_source,
+            uses_pretrained_weights=uses_pretrained_weights,
             execution_device=execution_device,
             external_program=external_program,
             network_required=network_required,
@@ -55,6 +57,7 @@ class ExternalWhisperBackend(ExternalBackendAdapter):
             "faster-whisper",
             model_version=model_size,
             checkpoint_source="Systran/faster-whisper",
+            uses_pretrained_weights=True,
             execution_device="cpu/int8",
             external_program=False,
             network_required=True,
@@ -77,27 +80,37 @@ class ExternalWhisperBackend(ExternalBackendAdapter):
             raise RuntimeError("External Whisper backend is not initialized.")
         return self._delegate.transcribe(audio_pcm, sample_rate)
 
+    @property
+    def last_rejection_reason(self) -> str | None:
+        if self._delegate is None:
+            return None
+        return getattr(self._delegate, "last_rejection_reason", None)
+
     def close(self) -> None:
         self._delegate = None
 
 
 class ExternalMediaPipeBackend(ExternalBackendAdapter):
-    def __init__(self) -> None:
+    def __init__(self, *, box_clamp_tolerance_pixels: float = 2.0) -> None:
         super().__init__(
             "MediaPipe Tasks",
             model_version="EfficientDet Lite2 / Pose Lite / Face Landmarker",
             checkpoint_source="Google MediaPipe model assets",
+            uses_pretrained_weights=True,
             execution_device="cpu",
             external_program=False,
             network_required=True,
         )
+        self._box_clamp_tolerance_pixels = box_clamp_tolerance_pixels
         self._delegate: Any | None = None
 
     def initialize(self) -> None:
         from runtime.ai_pipeline import LocalVisionAnalyzer
 
         try:
-            self._delegate = LocalVisionAnalyzer()
+            self._delegate = LocalVisionAnalyzer(
+                box_clamp_tolerance_pixels=self._box_clamp_tolerance_pixels
+            )
         except Exception as exc:
             self._mark_failed(exc)
             raise
@@ -120,6 +133,7 @@ class ExternalOllamaLanguageBackend(ExternalBackendAdapter):
             "Ollama local process",
             model_version=f"{model}; {vision_model}",
             checkpoint_source="Ollama model registry",
+            uses_pretrained_weights=True,
             execution_device="local Ollama host",
             external_program=True,
             network_required=True,
@@ -159,6 +173,7 @@ class ExternalSapiSpeechBackend(ExternalBackendAdapter):
             "Windows SAPI via pyttsx3",
             model_version=None,
             checkpoint_source="Installed Windows Korean SAPI voice",
+            uses_pretrained_weights=None,
             execution_device="local Windows audio output",
             external_program=False,
             network_required=False,

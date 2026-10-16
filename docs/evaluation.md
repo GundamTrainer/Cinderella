@@ -12,5 +12,7 @@ The helper validates that the IoU threshold is in `[0, 1]`. Empty denominators p
 - It does not measure temporal stability, latency, memory, fairness, calibration, or speech/language quality.
 - It uses greedy single-frame matching; it does not calculate average precision across confidence thresholds.
 - Ground-truth annotations and model predictions must already use the same class IDs and normalized coordinate convention.
+- The live pipeline's box validation, confidence filtering, temporal stabilizer, and short-lived world state are data-quality and presentation safeguards, not evidence that the underlying detector is more accurate.
+- Current unit tests use synthetic detector records and do not constitute a real-camera accuracy benchmark.
 
 Do not report a model as improved based only on this helper or on stabilized UI output. Compare model versions on a fixed, documented, session-separated held-out dataset.

@@ -24,6 +24,8 @@ class RuntimeSettings:
     hardware_simulator_enabled: bool
     camera_index: int = 0
     microphone_device: int | None = None
+    box_clamp_tolerance_pixels: float = 2.0
+    audio_input_queue_capacity: int = 24
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> RuntimeSettings:
@@ -39,6 +41,10 @@ class RuntimeSettings:
             camera_index = int(values.get("camera_index", 0))
             microphone_value = values.get("microphone_device")
             microphone_device = None if microphone_value is None else int(microphone_value)
+            box_clamp_tolerance_pixels = float(
+                values.get("box_clamp_tolerance_pixels", 2.0)
+            )
+            audio_input_queue_capacity = int(values.get("audio_input_queue_capacity", 24))
         except KeyError as exc:  # pragma: no cover - defensive
             raise ConfigurationError(f"Missing required config key: {exc.args[0]}") from exc
         except (TypeError, ValueError) as exc:
@@ -58,6 +64,12 @@ class RuntimeSettings:
             raise ConfigurationError("camera_index must be zero or greater.")
         if microphone_device is not None and microphone_device < 0:
             raise ConfigurationError("microphone_device must be zero or greater.")
+        if not 0.0 <= box_clamp_tolerance_pixels <= 32.0:
+            raise ConfigurationError(
+                "box_clamp_tolerance_pixels must be between 0 and 32."
+            )
+        if audio_input_queue_capacity <= 0:
+            raise ConfigurationError("audio_input_queue_capacity must be positive.")
 
         return cls(
             runtime_queue_capacity=runtime_queue_capacity,
@@ -70,6 +82,8 @@ class RuntimeSettings:
             hardware_simulator_enabled=hardware_simulator_enabled,
             camera_index=camera_index,
             microphone_device=microphone_device,
+            box_clamp_tolerance_pixels=box_clamp_tolerance_pixels,
+            audio_input_queue_capacity=audio_input_queue_capacity,
         )
 
 

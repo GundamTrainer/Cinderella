@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
+from typing import Any
 
 
 class DetectionState(StrEnum):
@@ -12,6 +14,17 @@ class DetectionState(StrEnum):
     LOW_CONFIDENCE = "low_confidence"
     UNKNOWN = "unknown"
     UNSUPPORTED_CLASS = "unsupported_class"
+    MISSING_CLASS = "missing_class"
+    INVALID_BOX = "invalid_box"
+    UNSTABLE = "unstable"
+    REJECTED = "rejected"
+
+
+class CoordinateSpace(StrEnum):
+    PIXEL_XYWH = "pixel_xywh"
+    PIXEL_XYXY = "pixel_xyxy"
+    NORMALIZED_XYWH = "normalized_xywh"
+    NORMALIZED_XYXY = "normalized_xyxy"
 
 
 @dataclass(frozen=True)
@@ -25,7 +38,13 @@ class BoundingBox:
 
     def __post_init__(self) -> None:
         values = (self.x_min, self.y_min, self.x_max, self.y_max)
-        if any(not isfinite(value) or not 0.0 <= value <= 1.0 for value in values):
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not isfinite(value)
+            or not 0.0 <= value <= 1.0
+            for value in values
+        ):
             raise ValueError("Bounding box coordinates must be finite values in [0, 1].")
         if self.x_min >= self.x_max or self.y_min >= self.y_max:
             raise ValueError("Bounding box must have positive width and height.")
@@ -43,14 +62,90 @@ class DetectionResult:
     box: BoundingBox
     state: DetectionState = DetectionState.CANDIDATE
     track_id: int | None = None
+    last_seen: float | None = None
 
     def __post_init__(self) -> None:
-        if self.class_id < 0:
+        if (
+            isinstance(self.class_id, bool)
+            or not isinstance(self.class_id, int)
+            or self.class_id < 0
+        ):
             raise ValueError("class_id must be zero or greater.")
-        if not self.label.strip():
+        if not isinstance(self.label, str) or not self.label.strip():
             raise ValueError("label must not be empty.")
-        if not isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0:
+        if (
+            isinstance(self.confidence, bool)
+            or not isinstance(self.confidence, (int, float))
+            or not isfinite(self.confidence)
+            or not 0.0 <= self.confidence <= 1.0
+        ):
             raise ValueError("confidence must be finite and in [0, 1].")
+        if not isinstance(self.box, BoundingBox):
+            raise TypeError("box must be a validated BoundingBox.")
+        if not isinstance(self.state, DetectionState):
+            raise TypeError("state must be a DetectionState.")
+        if self.track_id is not None and (
+            isinstance(self.track_id, bool)
+            or not isinstance(self.track_id, int)
+            or self.track_id < 0
+        ):
+            raise ValueError("track_id must be a nonnegative integer.")
+        if self.last_seen is not None and (
+            isinstance(self.last_seen, bool)
+            or not isinstance(self.last_seen, (int, float))
+            or not isfinite(self.last_seen)
+            or self.last_seen < 0
+        ):
+            raise ValueError("last_seen must be finite and nonnegative.")
+
+
+@dataclass(frozen=True)
+class DetectionObservation:
+    detection_id: str
+    frame_id: int
+    timestamp: float
+    source_backend: str
+    raw_class_id: float | str | None = None
+    normalized_class_id: int | None = None
+    label: str | None = None
+    confidence: float | None = None
+    bounding_box: BoundingBox | None = None
+    coordinate_space: CoordinateSpace = CoordinateSpace.NORMALIZED_XYXY
+    status: DetectionState = DetectionState.UNKNOWN
+    validation_errors: tuple[str, ...] = ()
+    tracking_id: int | None = None
+    synthetic: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.detection_id, str) or not isinstance(self.source_backend, str):
+            raise TypeError("detection_id and source_backend must be strings.")
+        if not self.detection_id or not self.source_backend.strip():
+            raise ValueError("detection_id and source_backend must not be empty.")
+        if (
+            isinstance(self.frame_id, bool)
+            or not isinstance(self.frame_id, int)
+            or self.frame_id < 0
+        ):
+            raise ValueError("frame_id must be a nonnegative integer.")
+        if (
+            isinstance(self.timestamp, bool)
+            or not isinstance(self.timestamp, (int, float))
+            or not isfinite(self.timestamp)
+        ):
+            raise ValueError("timestamp must be finite.")
+        if self.confidence is not None and (
+            isinstance(self.confidence, bool)
+            or not isinstance(self.confidence, (int, float))
+            or not isfinite(self.confidence)
+            or not 0.0 <= self.confidence <= 1.0
+        ):
+            raise ValueError("confidence must be finite and in [0, 1].")
+        if self.bounding_box is not None and not isinstance(self.bounding_box, BoundingBox):
+            raise TypeError("bounding_box must be a validated BoundingBox.")
+        if not isinstance(self.coordinate_space, CoordinateSpace):
+            raise TypeError("coordinate_space must be a CoordinateSpace.")
+        if not isinstance(self.status, DetectionState):
+            raise TypeError("status must be a DetectionState.")
 
 
 @dataclass(frozen=True)
@@ -58,8 +153,302 @@ class DetectionFrame:
     observed_at: float
     raw_detections: tuple[DetectionResult, ...]
     stable_detections: tuple[DetectionResult, ...]
-    unverified_detections: tuple[DetectionResult, ...] = ()
+    unverified_detections: tuple[DetectionObservation, ...] = ()
     rejected_count: int = 0
+    diagnostics: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class DetectionConversion:
+    detections: tuple[DetectionResult, ...]
+    unverified: tuple[DetectionObservation, ...]
+    diagnostics: tuple[tuple[str, int], ...]
+
+
+class BoundingBoxConversionError(ValueError):
+    """Raised when a detector box cannot be safely normalized."""
+
+
+def normalize_bounding_box(
+    coordinates: tuple[Any, Any, Any, Any],
+    *,
+    coordinate_space: CoordinateSpace,
+    image_width: int,
+    image_height: int,
+    clamp_tolerance_pixels: float = 2.0,
+) -> BoundingBox:
+    if (
+        isinstance(image_width, bool)
+        or not isinstance(image_width, int)
+        or isinstance(image_height, bool)
+        or not isinstance(image_height, int)
+        or image_width <= 0
+        or image_height <= 0
+    ):
+        raise BoundingBoxConversionError("image dimensions must be positive integers.")
+    if (
+        isinstance(clamp_tolerance_pixels, bool)
+        or not isinstance(clamp_tolerance_pixels, (int, float))
+        or not isfinite(clamp_tolerance_pixels)
+        or clamp_tolerance_pixels < 0
+    ):
+        raise BoundingBoxConversionError("clamp tolerance must be finite and nonnegative.")
+    if not isinstance(coordinate_space, CoordinateSpace):
+        raise BoundingBoxConversionError("coordinate_space must be a CoordinateSpace value.")
+    if len(coordinates) != 4 or any(
+        isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value)
+        for value in coordinates
+    ):
+        raise BoundingBoxConversionError("box coordinates must be finite numbers.")
+
+    first, second, third, fourth = (float(value) for value in coordinates)
+    if coordinate_space in {CoordinateSpace.PIXEL_XYWH, CoordinateSpace.NORMALIZED_XYWH}:
+        if third <= 0 or fourth <= 0:
+            raise BoundingBoxConversionError("box width and height must be positive.")
+        x_min, y_min, x_max, y_max = first, second, first + third, second + fourth
+    else:
+        x_min, y_min, x_max, y_max = first, second, third, fourth
+        if x_min >= x_max or y_min >= y_max:
+            raise BoundingBoxConversionError("box corners must have positive width and height.")
+
+    if coordinate_space in {CoordinateSpace.PIXEL_XYWH, CoordinateSpace.PIXEL_XYXY}:
+        x_tolerance = clamp_tolerance_pixels
+        y_tolerance = clamp_tolerance_pixels
+        x_min /= image_width
+        x_max /= image_width
+        y_min /= image_height
+        y_max /= image_height
+        x_tolerance /= image_width
+        y_tolerance /= image_height
+    else:
+        x_tolerance = clamp_tolerance_pixels / image_width
+        y_tolerance = clamp_tolerance_pixels / image_height
+
+    if (
+        x_min < -x_tolerance
+        or y_min < -y_tolerance
+        or x_max > 1.0 + x_tolerance
+        or y_max > 1.0 + y_tolerance
+    ):
+        raise BoundingBoxConversionError("box exceeds frame bounds beyond clamp tolerance.")
+    try:
+        return BoundingBox(
+            min(1.0, max(0.0, x_min)),
+            min(1.0, max(0.0, y_min)),
+            min(1.0, max(0.0, x_max)),
+            min(1.0, max(0.0, y_max)),
+        )
+    except ValueError as exc:
+        raise BoundingBoxConversionError(str(exc)) from exc
+
+
+def convert_detector_results(
+    detections: Iterable[Any],
+    *,
+    frame_id: int,
+    timestamp: float,
+    image_width: int,
+    image_height: int,
+    source_backend: str = "mediapipe",
+    minimum_confidence: float = 0.35,
+    supported_class_ids: set[int] | None = None,
+    clamp_tolerance_pixels: float = 2.0,
+) -> DetectionConversion:
+    if (
+        isinstance(minimum_confidence, bool)
+        or not isinstance(minimum_confidence, (int, float))
+        or not isfinite(minimum_confidence)
+        or not 0.0 <= minimum_confidence <= 1.0
+    ):
+        raise ValueError("minimum_confidence must be finite and in [0, 1].")
+    if isinstance(clamp_tolerance_pixels, bool) or not isinstance(
+        clamp_tolerance_pixels, (int, float)
+    ):
+        raise TypeError("clamp_tolerance_pixels must be a number.")
+    if not isfinite(clamp_tolerance_pixels) or clamp_tolerance_pixels < 0:
+        raise ValueError("clamp_tolerance_pixels must be finite and nonnegative.")
+    if isinstance(frame_id, bool) or not isinstance(frame_id, int) or frame_id < 0:
+        raise ValueError("frame_id must be a nonnegative integer.")
+    if (
+        isinstance(timestamp, bool)
+        or not isinstance(timestamp, (int, float))
+        or not isfinite(timestamp)
+    ):
+        raise ValueError("timestamp must be finite.")
+    if not isinstance(source_backend, str) or not source_backend.strip():
+        raise ValueError("source_backend must not be empty.")
+    accepted: list[DetectionResult] = []
+    unverified: list[DetectionObservation] = []
+    diagnostics: Counter[str] = Counter()
+
+    def reject(
+        index: int,
+        reason: str,
+        *,
+        raw_class_id: float | str | None = None,
+        normalized_class_id: int | None = None,
+        label: str | None = None,
+        confidence: float | None = None,
+        box: BoundingBox | None = None,
+        status: DetectionState = DetectionState.REJECTED,
+        coordinate_space: CoordinateSpace = CoordinateSpace.NORMALIZED_XYXY,
+    ) -> None:
+        diagnostics[reason] += 1
+        unverified.append(
+            DetectionObservation(
+                detection_id=f"{frame_id}:{index}",
+                frame_id=frame_id,
+                timestamp=timestamp,
+                source_backend=source_backend,
+                raw_class_id=raw_class_id,
+                normalized_class_id=normalized_class_id,
+                label=label,
+                confidence=confidence,
+                bounding_box=box,
+                coordinate_space=coordinate_space,
+                status=status,
+                validation_errors=(reason,),
+            )
+        )
+
+    for index, detection in enumerate(detections):
+        categories = getattr(detection, "categories", None)
+        if not isinstance(categories, (list, tuple)):
+            reject(index, "invalid_categories", status=DetectionState.MISSING_CLASS)
+            continue
+        if not categories:
+            reject(index, "missing_categories", status=DetectionState.MISSING_CLASS)
+            continue
+
+        scored_categories: list[tuple[float, Any]] = []
+        for category in categories:
+            score = getattr(category, "score", None)
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not isfinite(score)
+                or not 0.0 <= score <= 1.0
+            ):
+                diagnostics["invalid_confidence_candidate"] += 1
+                continue
+            scored_categories.append((float(score), category))
+        if not scored_categories:
+            reject(index, "missing_or_invalid_confidence")
+            continue
+
+        confidence, category = max(scored_categories, key=lambda item: item[0])
+        raw_class_id = getattr(category, "index", None)
+        raw_class_id_value = (
+            raw_class_id
+            if isinstance(raw_class_id, (int, float, str)) and not isinstance(raw_class_id, bool)
+            else None
+        )
+        category_name = getattr(category, "category_name", None)
+        label = category_name.strip() or None if isinstance(category_name, str) else None
+        raw_box = getattr(detection, "bounding_box", None)
+        box: BoundingBox | None = None
+        box_error: str | None = None
+        if raw_box is None:
+            box_error = "missing_bounding_box"
+        else:
+            try:
+                box = normalize_bounding_box(
+                    (
+                        getattr(raw_box, "origin_x", None),
+                        getattr(raw_box, "origin_y", None),
+                        getattr(raw_box, "width", None),
+                        getattr(raw_box, "height", None),
+                    ),
+                    coordinate_space=CoordinateSpace.PIXEL_XYWH,
+                    image_width=image_width,
+                    image_height=image_height,
+                    clamp_tolerance_pixels=clamp_tolerance_pixels,
+                )
+            except BoundingBoxConversionError as exc:
+                box_error = str(exc)
+
+        class_id: int | None
+        if isinstance(raw_class_id, int) and not isinstance(raw_class_id, bool):
+            class_id = raw_class_id
+        else:
+            class_id = None
+
+        if box_error is not None:
+            reject(
+                index,
+                box_error,
+                raw_class_id=raw_class_id_value,
+                normalized_class_id=class_id,
+                label=label,
+                confidence=confidence,
+                status=DetectionState.INVALID_BOX,
+                coordinate_space=CoordinateSpace.PIXEL_XYWH,
+            )
+            continue
+        if class_id is None:
+            reject(
+                index,
+                "missing_class_id" if raw_class_id is None else "invalid_class_id",
+                raw_class_id=raw_class_id_value,
+                label=label,
+                confidence=confidence,
+                box=box,
+                status=DetectionState.MISSING_CLASS,
+            )
+            continue
+        if class_id < 0:
+            reject(
+                index,
+                "invalid_class_id",
+                raw_class_id=raw_class_id_value,
+                normalized_class_id=class_id,
+                label=label,
+                confidence=confidence,
+                box=box,
+                status=DetectionState.REJECTED,
+            )
+            continue
+        if not label or label.casefold() == "unknown":
+            reject(
+                index,
+                "missing_class_label",
+                raw_class_id=raw_class_id_value,
+                normalized_class_id=class_id,
+                label=label,
+                confidence=confidence,
+                box=box,
+                status=DetectionState.UNKNOWN,
+            )
+            continue
+
+        if confidence < minimum_confidence:
+            reject(
+                index,
+                "low_confidence",
+                raw_class_id=raw_class_id_value,
+                normalized_class_id=class_id,
+                label=label,
+                confidence=confidence,
+                box=box,
+                status=DetectionState.LOW_CONFIDENCE,
+            )
+        elif supported_class_ids is not None and class_id not in supported_class_ids:
+            reject(
+                index,
+                "unsupported_class",
+                raw_class_id=raw_class_id_value,
+                normalized_class_id=class_id,
+                label=label,
+                confidence=confidence,
+                box=box,
+                status=DetectionState.UNSUPPORTED_CLASS,
+            )
+        else:
+            accepted.append(DetectionResult(class_id, label, confidence, box))
+
+    return DetectionConversion(
+        tuple(accepted), tuple(unverified), tuple(sorted(diagnostics.items()))
+    )
 
 
 def intersection_over_union(first: BoundingBox, second: BoundingBox) -> float:
@@ -125,7 +514,13 @@ class DetectionStabilizer:
             raise ValueError("minimum_confidence must be in [0, 1].")
         if not 0 <= minimum_area < maximum_area <= 1:
             raise ValueError("area thresholds must satisfy 0 <= minimum < maximum <= 1.")
-        if stable_hits < 1 or missing_tolerance_seconds < 0:
+        if (
+            isinstance(stable_hits, bool)
+            or not isinstance(stable_hits, int)
+            or stable_hits < 1
+            or not isfinite(missing_tolerance_seconds)
+            or missing_tolerance_seconds < 0
+        ):
             raise ValueError("stable_hits must be positive and missing tolerance nonnegative.")
         if any(not 0 <= threshold <= 1 for threshold in (class_thresholds or {}).values()):
             raise ValueError("class confidence thresholds must be in [0, 1].")
@@ -146,17 +541,27 @@ class DetectionStabilizer:
         self._last_observed_at = None
 
     def update(
-        self, raw_detections: Iterable[DetectionResult], *, observed_at: float
+        self,
+        raw_detections: Iterable[DetectionResult],
+        *,
+        observed_at: float,
+        frame_id: int = 0,
+        source_backend: str = "unknown",
+        unverified_detections: Iterable[DetectionObservation] = (),
+        diagnostics: Iterable[tuple[str, int]] = (),
     ) -> DetectionFrame:
-        if not isfinite(observed_at) or (
-            self._last_observed_at is not None and observed_at < self._last_observed_at
-        ):
+        if (
+            isinstance(observed_at, bool)
+            or not isinstance(observed_at, (int, float))
+            or not isfinite(observed_at)
+        ) or (self._last_observed_at is not None and observed_at < self._last_observed_at):
             raise ValueError("observed_at must be finite and nondecreasing.")
         self._last_observed_at = observed_at
         raw = tuple(raw_detections)
         eligible: list[DetectionResult] = []
         rejected = 0
-        unknown: list[DetectionResult] = []
+        unknown = list(unverified_detections)
+        diagnostic_counts = Counter(dict(diagnostics))
         for detection in raw:
             threshold = self.class_thresholds.get(detection.class_id, self.minimum_confidence)
             if detection.state == DetectionState.UNSUPPORTED_CLASS or (
@@ -164,26 +569,36 @@ class DetectionStabilizer:
                 and detection.class_id not in self.supported_class_ids
             ):
                 unknown.append(
-                    DetectionResult(
-                        detection.class_id,
-                        "unknown",
-                        detection.confidence,
-                        detection.box,
+                    self._observation(
+                        detection,
+                        observed_at,
+                        frame_id,
+                        source_backend,
                         DetectionState.UNSUPPORTED_CLASS,
                     )
                 )
             elif detection.confidence < threshold:
                 unknown.append(
-                    DetectionResult(
-                        detection.class_id,
-                        "unknown",
-                        detection.confidence,
-                        detection.box,
+                    self._observation(
+                        detection,
+                        observed_at,
+                        frame_id,
+                        source_backend,
                         DetectionState.LOW_CONFIDENCE,
                     )
                 )
             elif not self.minimum_area <= detection.box.area <= self.maximum_area:
                 rejected += 1
+                diagnostic_counts["box_area_rejected"] += 1
+                unknown.append(
+                    self._observation(
+                        detection,
+                        observed_at,
+                        frame_id,
+                        source_backend,
+                        DetectionState.REJECTED,
+                    )
+                )
             else:
                 eligible.append(detection)
         resolved = self._overlap_resolver.resolve(eligible)
@@ -232,13 +647,64 @@ class DetectionStabilizer:
                 track.label,
                 track.confidence,
                 track.box,
-                DetectionState.STABLE if track.hits >= self.stable_hits else DetectionState.CANDIDATE,
+                DetectionState.STABLE
+                if track.hits >= self.stable_hits
+                else DetectionState.CANDIDATE,
                 track.track_id,
+                track.last_seen,
             )
             for track in self._tracks
             if track.hits >= self.stable_hits
         )
-        return DetectionFrame(observed_at, raw, stable, tuple(unknown), rejected)
+        for track in self._tracks:
+            if track.hits < self.stable_hits:
+                unknown.append(
+                    DetectionObservation(
+                        detection_id=f"{frame_id}:{track.track_id}",
+                        frame_id=frame_id,
+                        timestamp=observed_at,
+                        source_backend=source_backend,
+                        raw_class_id=track.class_id,
+                        normalized_class_id=track.class_id,
+                        label=track.label,
+                        confidence=track.confidence,
+                        bounding_box=track.box,
+                        status=DetectionState.UNSTABLE,
+                        tracking_id=track.track_id,
+                    )
+                )
+        for reason, count in tuple(diagnostic_counts.items()):
+            diagnostic_counts[reason] = count
+        return DetectionFrame(
+            observed_at,
+            raw,
+            stable,
+            tuple(unknown),
+            rejected,
+            tuple(sorted(diagnostic_counts.items())),
+        )
+
+    @staticmethod
+    def _observation(
+        detection: DetectionResult,
+        observed_at: float,
+        frame_id: int,
+        source_backend: str,
+        status: DetectionState,
+    ) -> DetectionObservation:
+        return DetectionObservation(
+            detection_id=f"{frame_id}:{detection.class_id}",
+            frame_id=frame_id,
+            timestamp=observed_at,
+            source_backend=source_backend,
+            raw_class_id=detection.class_id,
+            normalized_class_id=detection.class_id,
+            label="unknown",
+            confidence=detection.confidence,
+            bounding_box=detection.box,
+            status=status,
+            tracking_id=detection.track_id,
+        )
 
 
 @dataclass(frozen=True)
@@ -336,9 +802,7 @@ class FaceFeatureStabilizer:
             self._candidate_since = observed_at
         previous = self._values.copy()
         self._values = {
-            name: (
-                self.smoothing * value + (1 - self.smoothing) * previous.get(name, value)
-            )
+            name: (self.smoothing * value + (1 - self.smoothing) * previous.get(name, value))
             for name, value in features.items()
         }
         differences = [

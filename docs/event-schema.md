@@ -25,6 +25,11 @@ Supported event types:
 - audio.speech_started
 - audio.speech_ended
 - audio.sound_detected
+- audio.frame_dropped
+- audio.input_overflow
+- audio.queue_pressure
+- audio.segment_accepted
+- audio.segment_rejected
 - speech.partial_transcript
 - speech.final_transcript
 - vision.person_detected
@@ -59,6 +64,11 @@ Unknown event types are rejected with a specific error. The runtime does not sil
 The opt-in local AI runtime uses `speech.final_transcript`, `vision.objects_detected`,
 `vision.action_detected`, and `vision.expression_cues_detected` for transient inference results.
 These events are not persisted by the runtime.
+
+Audio diagnostics are aggregate-only. Their payloads contain a count, an optional reason
+code, and `raw_audio_logged: false`; they never contain PCM samples. Queue drops and device
+overflow are distinguished, and `audio.segment_rejected` can report reasons such as
+`queue_gap`, `tts_echo_guard`, `speech_not_detected`, or `inference_error`.
 
 For `vision.objects_detected`, `payload.objects` contains confirmed labels after temporal
 stabilization. `payload.detections` contains those detections with class ID, label, confidence,

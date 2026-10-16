@@ -226,6 +226,22 @@ def test_runtime_settings_load_valid_file() -> None:
     assert settings.runtime_queue_capacity == 128
     assert settings.logging_level == "INFO"
     assert settings.audio_simulator_enabled is True
+    assert settings.audio_input_queue_capacity == 24
+
+
+def test_runtime_settings_reject_invalid_audio_queue_capacity() -> None:
+    with pytest.raises(ConfigurationError, match="audio_input_queue_capacity"):
+        RuntimeSettings.from_mapping({
+            "runtime_queue_capacity": 128,
+            "event_publish_timeout": 0.25,
+            "shutdown_timeout": 2.0,
+            "logging_level": "INFO",
+            "simulation_seed": 42,
+            "audio_simulator_enabled": True,
+            "vision_simulator_enabled": True,
+            "hardware_simulator_enabled": True,
+            "audio_input_queue_capacity": 0,
+        })
 
 
 def test_runtime_settings_reject_invalid_values() -> None:

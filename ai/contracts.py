@@ -27,6 +27,7 @@ class BackendInfo:
     kind: BackendKind
     model_version: str | None
     checkpoint_source: str | None
+    uses_pretrained_weights: bool | None
     execution_device: str
     external_program: bool
     network_required: bool

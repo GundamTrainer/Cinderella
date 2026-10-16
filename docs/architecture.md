@@ -36,6 +36,14 @@ The opt-in AI mode calls faster-whisper (CPU/int8) through an external-backend a
 
 `ai/vision.py` contains reusable typed detection/face feature models and temporal stabilizers. `datasets/object_detection/schema.py` validates annotation manifests without loading or storing media. `ai/evaluation.py` currently implements a small single-frame, class-aware IoU metric helper; it is not a full dataset benchmark.
 
+### Perception observations and audio diagnostics
+
+MediaPipe detections are converted into validated observations before entering the tracker. `Category.index` is optional, so a missing class ID, label, confidence, or box remains an unverified observation rather than being coerced into a confirmed label. Pixel `xywh` boxes are normalized against the actual frame size; coordinates may be clamped only within the configured pixel tolerance (default: 2 px), while malformed geometry and boxes farther outside the frame are rejected. Repeated detector issues are counted by reason and logged at increasing count milestones without logging media or feature data.
+
+Confirmed object labels require valid class metadata, supported class IDs, confidence and area thresholds, and a repeated overlapping detection. The tracker retains only short-lived validated state; `WorldStateTracker` records coarse image regions and movement from stable tracks, expiring missing objects after two seconds by default. These steps make output more explicit and temporally consistent; they do not increase the underlying detector's recognition accuracy. The world-state model does not currently generate interpretation hypotheses.
+
+Microphone callbacks hand copied sample chunks to a bounded queue configured by `audio_input_queue_capacity` (default: 24). Device overflow, dropped chunks, queue pressure, transcription acceptance/rejection, and TTS echo-guard discards are accumulated as counts and published as typed events. Sequence gaps and overflow markers prevent audio on opposite sides of a gap from being combined into one transcription window. Diagnostic event payloads contain counts and reason codes only, not samples or transcripts.
+
 ### Orchestrator
 
 The orchestrator is responsible for initializing components, starting them, consuming the event bus, and safely tearing down components in reverse order on shutdown or partial initialization failure.

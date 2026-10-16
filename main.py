@@ -59,7 +59,9 @@ def main() -> None:
     print(f"{PROJECT_NAME} v{PROJECT_VERSION}")
     if not args.live and not args.preview and not args.devices:
         print("Development environment initialized.")
-        print("Use --devices to check hardware, --preview for device checks, or --live for local AI.")
+        print(
+            "Use --devices to check hardware, --preview for device checks, or --live for local AI."
+        )
         return
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -92,6 +94,8 @@ def main() -> None:
                 chat_model=args.chat_model,
                 vision_model=args.vision_model,
                 speech_model=args.speech_model,
+                box_clamp_tolerance_pixels=settings.box_clamp_tolerance_pixels,
+                audio_input_queue_capacity=settings.audio_input_queue_capacity,
             )
         else:
             run_live_preview(camera_index=camera_index, microphone_device=microphone_device)
