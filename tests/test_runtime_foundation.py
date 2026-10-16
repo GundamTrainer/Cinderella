@@ -6,6 +6,7 @@ import pytest
 
 from ai.scene import WorldState
 from runtime.ai_pipeline import (
+    LocalChatError,
     LocalSpeechRecognizer,
     OllamaChat,
     PerceptionSnapshot,
@@ -509,9 +510,11 @@ def test_face_analysis_reports_movement_not_emotional_state() -> None:
     assert "happy" not in cues
 
 
-def test_chat_prompt_treats_affect_hypotheses_as_uncertain_and_confirmable() -> None:
+def test_chat_context_excludes_face_and_emotion_inferences() -> None:
     chat = OllamaChat()
     perception = PerceptionSnapshot(
+        face_detected=True,
+        expression_cues=("smile-like facial movement",),
         tentative_interpretations=(
             SimpleNamespace(
                 hypothesis="possible_positive_affect",
@@ -522,10 +525,10 @@ def test_chat_prompt_treats_affect_hypotheses_as_uncertain_and_confirmable() -> 
 
     context = perception.prompt_context()
 
-    assert "감정 관련 가설(낮은 확신, 확인 필요)" in context
-    assert "confirmation required" in context
-    assert "검증되지 않은 낮은 확신의 가설" in chat._system
-    assert "사용자가 직접 확인" in chat._system
+    assert "시각 관찰 단서" in context
+    assert "smile-like facial movement" not in context
+    assert "possible_positive_affect" not in context
+    assert "감정·의도·신원·건강을 단정하지 마" in chat._system
 
 
 def test_speech_recognizer_resamples_to_whisper_sample_rate() -> None:
@@ -546,7 +549,7 @@ def test_speech_recognizer_resamples_to_whisper_sample_rate() -> None:
     assert fake_model.received_length == 16_000
 
 
-def test_local_chat_sends_only_transcript_and_textual_perception(
+def test_local_chat_sends_only_transcript_for_nonvisual_conversation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     chat = OllamaChat()
@@ -570,7 +573,9 @@ def test_local_chat_sends_only_transcript_and_textual_perception(
     serialized = str(sent_payloads[0])
     assert reply == "주변에 의자가 보입니다."
     assert "안녕하세요" in serialized
-    assert "chair" in serialized
+    assert "chair" not in serialized
+    assert "left arm raised" not in serialized
+    assert "smile-like facial movement" not in serialized
     assert "images" not in serialized
     assert "happy" not in serialized
     assert sent_payloads[0]["options"]["temperature"] == 0.72
@@ -609,6 +614,106 @@ def test_local_chat_uses_current_image_without_retaining_it(
     assert "지금 뭐가 보여?" in str(messages[-1])
     assert sent_payloads[0]["model"] == chat.vision_model
     assert "images" not in str(chat._history)
+    assert "얼굴 움직임" not in str(messages)
+    assert "감정 관련 가설" not in str(messages)
+
+
+def test_visual_question_uses_only_non_face_observation_context_without_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat = OllamaChat()
+    sent_payloads: list[dict[str, object]] = []
+
+    def fake_post(endpoint: str, payload: dict[str, object]) -> dict[str, object]:
+        sent_payloads.append(payload)
+        return {"message": {"content": "감지된 물체 후보는 컵입니다."}}
+
+    monkeypatch.setattr(chat, "_post", fake_post)
+    chat.reply(
+        "화면에 어떤 물건이 있어?",
+        PerceptionSnapshot(
+            objects=("cup",),
+            expression_cues=("smile-like facial movement",),
+            tentative_interpretations=(SimpleNamespace(hypothesis="possible_positive_affect"),),
+        ),
+    )
+
+    serialized = str(sent_payloads[0]["messages"])
+    assert "cup" in serialized
+    assert "smile-like facial movement" not in serialized
+    assert "possible_positive_affect" not in serialized
+
+
+def test_visual_chat_keeps_dialogue_context_without_retaining_prior_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat = OllamaChat()
+    sent_payloads: list[dict[str, object]] = []
+
+    def fake_post(endpoint: str, payload: dict[str, object]) -> dict[str, object]:
+        sent_payloads.append(payload)
+        return {"message": {"content": f"응답 {len(sent_payloads)}"}}
+
+    monkeypatch.setattr(chat, "_post", fake_post)
+    chat.reply("오늘 기분이 별로야.", PerceptionSnapshot(), image_jpeg=b"old-frame")
+    chat.reply("지금 뭐가 보여?", PerceptionSnapshot(objects=("chair",)), image_jpeg=b"new-frame")
+
+    messages = sent_payloads[1]["messages"]
+    assert isinstance(messages, list)
+    assert any(
+        message.get("role") == "user" and message.get("content") == "오늘 기분이 별로야."
+        for message in messages
+    )
+    assert any(
+        message.get("role") == "assistant" and message.get("content") == "응답 1"
+        for message in messages
+    )
+    assert "b2xkLWZyYW1l" not in str(messages)
+    assert "bmV3LWZyYW1l" in str(messages)
+    assert "images" not in str(chat._history)
+
+
+def test_failed_chat_turn_is_not_retained_in_conversation_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat = OllamaChat()
+
+    def fail_post(endpoint: str, payload: dict[str, object]) -> dict[str, object]:
+        del endpoint, payload
+        raise LocalChatError("simulated local model failure")
+
+    monkeypatch.setattr(chat, "_post", fail_post)
+    with pytest.raises(LocalChatError, match="simulated"):
+        chat.reply("이 질문은 실패해야 해.", PerceptionSnapshot())
+
+    assert chat._history == []
+
+
+def test_proactive_instruction_is_not_saved_as_a_user_chat_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat = OllamaChat()
+    sent_payloads: list[dict[str, object]] = []
+
+    def fake_post(endpoint: str, payload: dict[str, object]) -> dict[str, object]:
+        sent_payloads.append(payload)
+        return {"message": {"content": "잠깐 쉬어가는 중이군요."}}
+
+    monkeypatch.setattr(chat, "_post", fake_post)
+    chat.initiate(PerceptionSnapshot(), None, reason="quiet_pause")
+
+    assert chat._history == [
+        {"role": "assistant", "content": "잠깐 쉬어가는 중이군요."}
+    ]
+    chat.reply("맞아요.", PerceptionSnapshot())
+
+    messages = sent_payloads[1]["messages"]
+    assert isinstance(messages, list)
+    assert any(
+        message.get("role") == "assistant" and message.get("content") == "잠깐 쉬어가는 중이군요."
+        for message in messages
+    )
+    assert "quiet pause in the conversation" not in str(messages)
 
 
 def test_visual_context_is_only_requested_for_visual_questions() -> None:
@@ -616,6 +721,9 @@ def test_visual_context_is_only_requested_for_visual_questions() -> None:
     assert _asks_about_visual_context("저 물건은 무슨 색이야?")
     assert _asks_about_visual_context("이게 뭔지 알려줘")
     assert not _asks_about_visual_context("오늘 날씨가 어때?")
+    assert not _asks_about_visual_context("너는 뭐야?")
+    assert not _asks_about_visual_context("누가 이겼어?")
+    assert not _asks_about_visual_context("그 영화는 뭐야?")
 
 
 def test_typed_chat_is_queued_without_disabling_microphone_path() -> None:
@@ -665,6 +773,22 @@ def test_proactive_scheduler_waits_and_rate_limits_visual_cues() -> None:
     scheduler.mark_prompted(scene, now=60)
     assert scheduler.next_reason(scene, now=119) is None
     assert scheduler.next_reason(scene, now=120) == "quiet_pause"
+
+
+def test_face_movement_alone_does_not_trigger_proactive_conversation() -> None:
+    import random
+
+    scheduler = ProactiveConversationScheduler(
+        minimum_idle_seconds=60,
+        maximum_idle_seconds=120,
+        stable_cue_seconds=4,
+        rng=random.Random(1),
+        now=0,
+    )
+    face_movement = PerceptionSnapshot(expression_cues=("smile-like facial movement",))
+
+    assert scheduler.next_reason(face_movement, now=59) is None
+    assert scheduler.next_reason(face_movement, now=60) is None
 
 
 def test_blendshape_smoothing_reduces_single_frame_spikes() -> None:

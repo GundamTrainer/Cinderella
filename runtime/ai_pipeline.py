@@ -99,22 +99,11 @@ class PerceptionSnapshot:
             if self.world_state and self.world_state.uncertain_labels
             else "none"
         )
-        tentative = (
-            "; ".join(
-                f"{item.hypothesis} ({item.confidence:.2f}, confirmation required)"
-                for item in self.tentative_interpretations
-            )
-            if self.tentative_interpretations
-            else "none"
-        )
         return (
-            "카메라 영상 관찰 단서(불확실할 수 있으며 감정·의도의 확정 판정이 아님): "
+            "사용자가 물어본 경우에만 참고할 수 있는 시각 관찰 단서(오류 가능): "
             f"물체={', '.join(self.objects) if self.objects else '없음/미검출'}, "
             f"시간적 장면 상태={scene}, 미확정 후보={uncertain}, "
-            f"자세·행동 단서={', '.join(self.action_cues) if self.action_cues else '없음/미검출'}, "
-            f"얼굴 감지={'예' if self.face_detected else '아니오'}, "
-            f"얼굴 움직임 단서={', '.join(self.expression_cues) if self.expression_cues else '없음/미검출'}, "
-            f"감정 관련 가설(낮은 확신, 확인 필요)={tentative}."
+            f"관찰 가능한 자세 단서={', '.join(self.action_cues) if self.action_cues else '없음/미검출'}."
         )
 
 
@@ -134,31 +123,37 @@ def _asks_about_visual_context(transcript: str) -> bool:
         "뭘 보고",
         "뭘 들고",
         "뭐가 있어",
-        "뭐가 있",
-        "뭐가",
-        "뭐야",
+        "뭐가 보",
+        "무엇이 보",
+        "무엇이 있",
+        "이게 뭐",
+        "이건 뭐",
+        "이거 뭐",
+        "저게 뭐",
+        "저건 뭐",
+        "저거 뭐",
         "뭔지",
         "무엇인지",
         "물체",
         "사물",
-        "저거",
-        "저게",
-        "저건",
-        "이거",
-        "이게",
-        "이건",
-        "이것",
-        "저것",
         "장면",
         "색깔",
         "색이",
         "사진",
         "이미지",
         "카메라",
-        "앞에",
-        "옆에",
+        "화면",
+        "카메라 앞에",
+        "화면 앞에",
+        "앞에 뭐",
+        "앞에 있는",
+        "앞에 놓인",
+        "옆에 뭐",
+        "옆에 있는",
         "표정",
-        "누가",
+        "사람 있어",
+        "사람이 있어",
+        "몇 명",
         "무슨 물건",
         "어떤 물건",
         "what do you see",
@@ -576,17 +571,19 @@ class OllamaChat:
         self._history: list[dict[str, Any]] = []
         self._system = (
             "너는 사용자의 말을 잘 듣고 대화를 주고받는 AI야. "
-            "매번 '안녕하세요', '무엇을 도와드릴까요?'로 시작하지 마. "
-            "사용자가 이야기를 꺼내려 하면 인사나 설명을 늘어놓지 말고, "
-            "'그럼요. 편하게 얘기해 주세요.'처럼 짧고 자연스럽게 받아줘. "
-            "이미 대화 중이면 직전 말의 구체적인 내용에 바로 반응해. "
-            "한국어 해요체로 보통 한두 문장만 말하고, 불필요한 질문이나 반복을 피해야 해. "
+            "사용자가 쓴 언어와 대화의 맥락에 맞춰 자연스럽고 직접적으로 답해. "
+            "정해진 인사말이나 답변 틀을 반복하지 말고, 직전 말의 구체적인 내용에 반응해. "
+            "간단한 말에는 간결하게 답하되, 복잡하거나 감정적인 주제는 필요한 만큼 충분히 다뤄. "
+            "대화를 이어갈 질문은 실제로 도움이 될 때만 하나 덧붙이고, 사용자가 원치 않으면 "
+            "질문을 계속하지 마. 사용자의 말을 그대로 길게 되풀이하거나 매번 요약하지 마. "
             "정해지지 않은 캐릭터 성격을 임의로 만들거나 사람인 척하지 마. "
             "얼굴이나 목소리만으로 감정·의도·신원·건강을 단정하지 마. "
             "감정 관련 단서는 검증되지 않은 낮은 확신의 가설일 뿐이야. "
             "감정을 사실처럼 말하지 말고, 꼭 필요하면 사용자가 직접 확인할 수 있도록 조심스럽게 질문해. "
+            "카메라 내용은 사용자가 화면에 대해 물었을 때만 언급해. "
             "카메라 질문에는 첨부된 이미지를 직접 확인하고, 자동 검출이 놓쳤을 수 있어. "
-            "확실하지 않은 물체는 지어내지 말고 불확실하다고 말해."
+            "얼굴로 사람의 신원을 알아내거나 추측하지 마. 확실하지 않은 물체는 지어내지 말고 "
+            "불확실하다고 말해."
         )
 
     def _post(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -628,25 +625,18 @@ class OllamaChat:
         perception: PerceptionSnapshot,
         image_jpeg: bytes | None = None,
     ) -> str:
-        context = perception.prompt_context()
-        use_vision_model = image_jpeg is not None and _asks_about_visual_context(transcript)
-        context += "\n자동 검출 결과는 참고용이며, 미검출이 물체의 부재를 뜻하지는 않습니다."
-        if use_vision_model:
-            context = (
-                f"{context}\nThe user asked in Korean: {transcript!r}. Inspect the attached "
-                "image directly. In one concise Korean sentence, describe the visible objects, "
-                "colors, and layout to answer the user. If the question is unclear, describe the "
-                "image rather than asking what the user means."
-            )
+        visual_question = _asks_about_visual_context(transcript)
+        use_vision_model = image_jpeg is not None and visual_question
+        if visual_question and image_jpeg is None:
+            content = f"{perception.prompt_context()}\n사용자 발화: {transcript}"
+        else:
+            content = transcript
         images = (
             [base64.b64encode(image_jpeg).decode("ascii")]
             if image_jpeg is not None and use_vision_model
             else []
         )
-        user_message: dict[str, Any] = {
-            "role": "user",
-            "content": (context if use_vision_model else f"{context}\n\n사용자 발화: {transcript}"),
-        }
+        user_message: dict[str, Any] = {"role": "user", "content": content}
         request_message = dict(user_message)
         if images:
             request_message["images"] = images
@@ -654,19 +644,14 @@ class OllamaChat:
                 f"사용자의 질문: {transcript}\n"
                 "첨부된 현재 이미지를 직접 살펴 질문에 한국어로 답해. "
                 "자동 검출이 놓친 물체가 있을 수 있으니 화면에서 확인되는 것만 설명하고, "
-                "확실하지 않은 부분은 불확실하다고 말해."
+                "얼굴로 사람의 신원을 추측하지 마. 확실하지 않은 부분은 불확실하다고 말해."
             )
-        self._history.append(user_message)
-        self._history = self._history[-8:]
-        history_messages = (
-            [{"role": "system", "content": self._system}, request_message]
-            if use_vision_model
-            else [
-                {"role": "system", "content": self._system},
-                *self._history[:-1],
-                request_message,
-            ]
-        )
+        pending_history = [*self._history, user_message][-8:]
+        history_messages = [
+            {"role": "system", "content": self._system},
+            *pending_history[:-1],
+            request_message,
+        ]
         result = self._post(
             "/api/chat",
             {
@@ -685,8 +670,7 @@ class OllamaChat:
         answer = result.get("message", {}).get("content", "").strip()
         if not answer:
             raise LocalChatError("Local Ollama returned an empty response.")
-        self._history.append({"role": "assistant", "content": answer})
-        self._history = self._history[-8:]
+        self._history = [*pending_history, {"role": "assistant", "content": answer}][-8:]
         return answer
 
     def initiate(
@@ -737,7 +721,7 @@ class OllamaChat:
             raise LocalChatError("Local Ollama returned an empty proactive response.")
         if answer.casefold() == "skip":
             return ""
-        self._history.extend([message, {"role": "assistant", "content": answer}])
+        self._history.append({"role": "assistant", "content": answer})
         self._history = self._history[-8:]
         return answer
 
@@ -806,9 +790,7 @@ class ProactiveConversationScheduler:
 
     @staticmethod
     def _signature(perception: PerceptionSnapshot) -> tuple[str, ...]:
-        return tuple(
-            sorted((*perception.objects, *perception.action_cues, *perception.expression_cues))
-        )
+        return tuple(sorted((*perception.objects, *perception.action_cues)))
 
     def mark_activity(self, *, now: float | None = None) -> None:
         current = time.monotonic() if now is None else now
@@ -1249,8 +1231,9 @@ def run_ai_live(
                     print(f"Cinderella: {answer}\n")
                     on_status("Cinderella replied aloud in Korean.")
                 scheduler.mark_prompted(perception)
-            except Exception:
+            except Exception as exc:
                 logger.exception("Local conversational inference failed.")
+                on_status(f"Local reply failed: {exc}")
 
     def text_input_worker() -> None:
         on_status(
