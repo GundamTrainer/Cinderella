@@ -6,7 +6,7 @@ The deterministic simulation components do not access real hardware or create ra
 
 The simulation components emit synthetic metadata only. Separate, opt-in laptop modes access real camera frames and microphone samples while active.
 
-`python main.py --preview` opens the devices for a local view and level meter. `python main.py --live` additionally runs local transcription, vision inference, chat, and offline speech output. Neither mode writes audio/video files. Raw microphone buffers and camera frames are processed in memory. Recognized text and abstract visual cues go to Ollama over the loopback interface on this computer. A temporary JPEG thumbnail (maximum 448 pixels on its longest side) of the current frame is included only when the recognized utterance is a visual question; the image is not retained in chat history or saved to disk. Voice output uses the Windows Korean SAPI voice locally. Press Q or Esc to stop capture. First use downloads model assets to the user's cache; later inference can run without internet.
+`python main.py --preview` opens the devices for a local view and level meter. `python main.py --live` additionally runs local transcription, vision inference, chat, and offline speech output. Neither mode writes audio/video files. Raw microphone buffers and camera frames are processed in memory. Recognized speech or typed chat text and abstract visual cues go to Ollama over an HTTP loopback address on this computer; remote Ollama endpoints are rejected. A temporary JPEG thumbnail (maximum 448 pixels on its longest side) of the current frame is included only when a voice or typed message asks about the camera view; the image is not retained in chat history or saved to disk. Voice output uses the Windows Korean SAPI voice locally. Model weights are downloaded from their configured public model repositories on first use; these are file downloads, not remote inference, and model requests are not sent to a hosted AI API. Press Q or Esc to stop capture. First use downloads model assets to the user's cache; later inference can run without internet.
 
 ## Planned privacy controls
 
@@ -15,6 +15,8 @@ Future multimodal processing components must implement explicit privacy boundari
 - access controls around stored recordings
 - sanitization of generated metadata
 - no raw media persistence by default
+
+The detection evaluation/dataset interfaces use metadata and normalized boxes; the synthetic example contains no image file. Do not add camera-derived samples to a dataset without a separate consent, retention, and access-control design.
 
 ## Not implemented
 

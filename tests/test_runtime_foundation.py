@@ -10,6 +10,8 @@ from runtime.ai_pipeline import (
     PerceptionSnapshot,
     ProactiveConversationScheduler,
     _asks_about_visual_context,
+    _ChatJob,
+    _queue_text_chat_message,
     _smooth_blendshapes,
     _visual_chat_frame,
     facial_expression_cues,
@@ -396,6 +398,21 @@ def test_local_chat_sends_only_transcript_and_textual_perception(monkeypatch: py
     assert "chair" in serialized
     assert "images" not in serialized
     assert "happy" not in serialized
+    assert sent_payloads[0]["options"]["temperature"] == 0.72
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    (
+        "https://127.0.0.1:11434",
+        "http://ollama.example.com:11434",
+        "http://192.168.1.15:11434",
+        "http://user@localhost:11434",
+    ),
+)
+def test_local_chat_rejects_non_loopback_endpoints(base_url: str) -> None:
+    with pytest.raises(ValueError, match="loopback"):
+        OllamaChat(base_url=base_url)
 
 
 def test_local_chat_uses_current_image_without_retaining_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -412,6 +429,7 @@ def test_local_chat_uses_current_image_without_retaining_it(monkeypatch: pytest.
     messages = sent_payloads[0]["messages"]
     assert isinstance(messages, list)
     assert "anBlZy1mcmFtZQ==" in str(messages[-1])
+    assert "지금 뭐가 보여?" in str(messages[-1])
     assert sent_payloads[0]["model"] == chat.vision_model
     assert "images" not in str(chat._history)
 
@@ -419,7 +437,23 @@ def test_local_chat_uses_current_image_without_retaining_it(monkeypatch: pytest.
 def test_visual_context_is_only_requested_for_visual_questions() -> None:
     assert _asks_about_visual_context("지금 뭐가 보여?")
     assert _asks_about_visual_context("저 물건은 무슨 색이야?")
+    assert _asks_about_visual_context("이게 뭔지 알려줘")
     assert not _asks_about_visual_context("오늘 날씨가 어때?")
+
+
+def test_typed_chat_is_queued_without_disabling_microphone_path() -> None:
+    import queue
+
+    jobs: queue.Queue[_ChatJob | None] = queue.Queue(maxsize=1)
+    scheduler = ProactiveConversationScheduler(now=0)
+
+    assert _queue_text_chat_message("  안녕, 지금 뭐가 보여?  ", jobs, scheduler)
+    assert not _queue_text_chat_message("두 번째 메시지", jobs, scheduler)
+    job = jobs.get_nowait()
+    assert job is not None
+    assert job.transcript == "안녕, 지금 뭐가 보여?"
+    assert job.source == "keyboard"
+    assert _ChatJob(transcript="마이크 입력").source == "microphone"
 
 
 def test_visual_chat_frame_is_resized_with_aspect_ratio_preserved() -> None:

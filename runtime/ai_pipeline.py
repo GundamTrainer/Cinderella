@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import logging
 import queue
@@ -8,6 +9,7 @@ import random
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,12 +17,28 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from ai.external_backends import (
+    ExternalMediaPipeBackend,
+    ExternalOllamaLanguageBackend,
+    ExternalSapiSpeechBackend,
+    ExternalWhisperBackend,
+)
+from ai.vision import (
+    BoundingBox,
+    DetectionFrame,
+    DetectionResult,
+    DetectionStabilizer,
+    DetectionState,
+    FaceFeatureFrame,
+    FaceFeatureStabilizer,
+)
+
 from .event_bus import Event, EventBus, EventBusFullError, EventType
 
 logger = logging.getLogger(__name__)
 
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-CHAT_MODEL = "qwen2.5:1.5b"
+CHAT_MODEL = "qwen2.5:3b"
 VISION_CHAT_MODEL = "qwen2.5vl:3b"
 WHISPER_MODEL = "small"
 SPEECH_WINDOW_SECONDS = 5
@@ -59,6 +77,8 @@ class PerceptionSnapshot:
     expression_cues: tuple[str, ...] = ()
     confidence: float = 0.0
     face_detected: bool = False
+    detections: DetectionFrame | None = None
+    face_features: FaceFeatureFrame | None = None
 
     def prompt_context(self) -> str:
         return (
@@ -81,10 +101,26 @@ def _asks_about_visual_context(transcript: str) -> bool:
         "보여",
         "보이는",
         "보입",
+        "보이니",
+        "보이냐",
+        "뭘 보고",
+        "뭘 들고",
+        "뭐가 있어",
+        "뭐가 있",
         "뭐가",
         "뭐야",
+        "뭔지",
+        "무엇인지",
         "물체",
         "사물",
+        "저거",
+        "저게",
+        "저건",
+        "이거",
+        "이게",
+        "이건",
+        "이것",
+        "저것",
         "장면",
         "색깔",
         "색이",
@@ -93,12 +129,10 @@ def _asks_about_visual_context(transcript: str) -> bool:
         "카메라",
         "앞에",
         "옆에",
-        "이거",
-        "이건",
-        "저거",
-        "저건",
         "표정",
         "누가",
+        "무슨 물건",
+        "어떤 물건",
         "what do you see",
         "what is visible",
         "describe this image",
@@ -208,6 +242,16 @@ class LocalVisionAnalyzer:
         self._pose_landmarker = None
         self._face_landmarker = None
         self._smoothed_blendshapes: dict[str, float] = {}
+        self._detection_stabilizer = DetectionStabilizer(
+            minimum_confidence=0.35,
+            class_thresholds={0: 0.45},
+            supported_class_ids=set(range(80)),
+        )
+        self._face_stabilizer = FaceFeatureStabilizer(
+            smoothing=0.45,
+            minimum_stable_duration=0.25,
+            missing_tolerance_frames=2,
+        )
         try:
             self._object_detector = vision.ObjectDetector.create_from_options(
                 vision.ObjectDetectorOptions(
@@ -252,45 +296,113 @@ class LocalVisionAnalyzer:
         pose_result = self._pose_landmarker.detect_for_video(image, timestamp_ms)
         face_result = self._face_landmarker.detect_for_video(image, timestamp_ms)
 
-        objects: list[str] = []
-        confidences: list[float] = []
+        height, width = frame.shape[:2]
+        observed_at = timestamp_ms / 1000.0
+        raw_detections: list[DetectionResult] = []
         for detection in object_result.detections:
             if detection.categories:
                 category = detection.categories[0]
-                objects.append(category.category_name)
-                confidences.append(float(category.score))
+                box = detection.bounding_box
+                try:
+                    normalized_box = BoundingBox(
+                        box.origin_x / width,
+                        box.origin_y / height,
+                        (box.origin_x + box.width) / width,
+                        (box.origin_y + box.height) / height,
+                    )
+                    class_id = int(category.index)
+                    label = str(category.category_name or "unknown")
+                    state = (
+                        DetectionState.CANDIDATE
+                        if class_id in range(80)
+                        else DetectionState.UNSUPPORTED_CLASS
+                    )
+                    raw_detections.append(
+                        DetectionResult(
+                            class_id,
+                            label,
+                            float(category.score),
+                            normalized_box,
+                            state,
+                        )
+                    )
+                except (AttributeError, TypeError, ValueError) as exc:
+                    logger.warning("Rejected invalid object detector result: %s", exc)
+        detection_frame = self._detection_stabilizer.update(
+            raw_detections,
+            observed_at=observed_at,
+        )
+        objects = tuple(
+            detection.label
+            for detection in detection_frame.stable_detections
+            if detection.state == DetectionState.STABLE
+        )
+        confidences = [
+            detection.confidence
+            for detection in detection_frame.stable_detections
+            if detection.state == DetectionState.STABLE
+        ]
 
         action_cues: tuple[str, ...] = ()
         if pose_result.pose_landmarks:
             action_cues = raised_arm_cues(pose_result.pose_landmarks[0])
 
         expression_cues: tuple[str, ...] = ()
-        if face_result.face_blendshapes:
+        face_count = len(face_result.face_landmarks)
+        face_measurements: dict[str, float] | None = None
+        if face_count == 1 and face_result.face_blendshapes:
             self._smoothed_blendshapes = _smooth_blendshapes(
                 self._smoothed_blendshapes,
                 face_result.face_blendshapes[0],
             )
+            scores = self._smoothed_blendshapes
+            face_measurements = {
+                "eye_openness_left": 1.0 - scores.get("eyeBlinkLeft", 0.0),
+                "eye_openness_right": 1.0 - scores.get("eyeBlinkRight", 0.0),
+                "mouth_openness": scores.get("jawOpen", 0.0),
+                "mouth_corner_displacement": (
+                    scores.get("mouthSmileLeft", 0.0) + scores.get("mouthSmileRight", 0.0)
+                )
+                / 2,
+                "brow_displacement": (
+                    scores.get("browOuterUpLeft", 0.0)
+                    + scores.get("browOuterUpRight", 0.0)
+                    + scores.get("browDownLeft", 0.0)
+                    + scores.get("browDownRight", 0.0)
+                )
+                / 4,
+            }
+        elif face_count > 1:
+            self._smoothed_blendshapes = {}
+        face_features = self._face_stabilizer.update(
+            face_measurements,
+            face_count=face_count,
+            observed_at=observed_at,
+        )
+        if face_features.stable:
             expression_cues = facial_expression_cues(
                 [
                     SimpleNamespace(category_name=name, score=score)
                     for name, score in self._smoothed_blendshapes.items()
                 ]
             )
-        else:
-            self._smoothed_blendshapes = {}
 
         return PerceptionSnapshot(
             objects=tuple(objects),
             action_cues=action_cues,
             expression_cues=expression_cues,
             confidence=max(confidences, default=0.0),
-            face_detected=bool(face_result.face_landmarks),
+            face_detected=face_count == 1,
+            detections=detection_frame,
+            face_features=face_features,
         )
 
     def close(self) -> None:
         for task in (self._face_landmarker, self._pose_landmarker, self._object_detector):
             if task is not None:
                 task.close()
+        self._detection_stabilizer.reset()
+        self._face_stabilizer.reset()
 
 
 def _smooth_blendshapes(
@@ -362,17 +474,36 @@ class OllamaChat:
     ) -> None:
         self.model = model
         self.vision_model = vision_model
+        parsed_url = urllib.parse.urlsplit(base_url)
+        hostname = parsed_url.hostname
+        is_loopback_ip = False
+        if hostname is not None:
+            try:
+                is_loopback_ip = ipaddress.ip_address(hostname).is_loopback
+            except ValueError:
+                is_loopback_ip = hostname.casefold() == "localhost"
+        if (
+            parsed_url.scheme != "http"
+            or not is_loopback_ip
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            raise ValueError("Ollama must use an unauthenticated HTTP loopback URL.")
         self.base_url = base_url.rstrip("/")
         self._history: list[dict[str, Any]] = []
         self._system = (
-            "You are a locally running conversational AI. Speak naturally and warmly in Korean, "
-            "like an attentive conversation partner, but never pretend to be human or claim to "
-            "have real feelings. You may describe concrete visible objects, posture, and facial "
-            "movements as uncertain observations. Never infer true emotion, intention, identity, "
-            "health, or personality from a face or voice. If unsure, ask instead of guessing. "
-            "The current user image, when present, is primary evidence: inspect it directly and "
-            "do not treat an automated 'none detected' cue as proof that something is absent. "
-            "Keep spoken replies concise and avoid repetitive questions."
+            "너는 사용자의 말을 잘 듣고 대화를 주고받는 AI야. "
+            "매번 '안녕하세요', '무엇을 도와드릴까요?'로 시작하지 마. "
+            "사용자가 이야기를 꺼내려 하면 인사나 설명을 늘어놓지 말고, "
+            "'그럼요. 편하게 얘기해 주세요.'처럼 짧고 자연스럽게 받아줘. "
+            "이미 대화 중이면 직전 말의 구체적인 내용에 바로 반응해. "
+            "한국어 해요체로 보통 한두 문장만 말하고, 불필요한 질문이나 반복을 피해야 해. "
+            "정해지지 않은 캐릭터 성격을 임의로 만들거나 사람인 척하지 마. "
+            "얼굴이나 목소리만으로 감정·의도·신원·건강을 단정하지 마. "
+            "카메라 질문에는 첨부된 이미지를 직접 확인하고, 자동 검출이 놓쳤을 수 있어. "
+            "확실하지 않은 물체는 지어내지 말고 불확실하다고 말해."
         )
 
     def _post(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -441,8 +572,10 @@ class OllamaChat:
         if images:
             request_message["images"] = images
             request_message["content"] = (
-                "Inspect the attached image directly. Describe its visible colors and layout "
-                "in Korean. The detector may have missed objects."
+                f"사용자의 질문: {transcript}\n"
+                "첨부된 현재 이미지를 직접 살펴 질문에 한국어로 답해. "
+                "자동 검출이 놓친 물체가 있을 수 있으니 화면에서 확인되는 것만 설명하고, "
+                "확실하지 않은 부분은 불확실하다고 말해."
             )
         self._history.append(user_message)
         self._history = self._history[-8:]
@@ -462,9 +595,11 @@ class OllamaChat:
                 "messages": history_messages,
                 "stream": False,
                 "options": {
-                    "temperature": 0.1 if use_vision_model else 0.4,
+                    "temperature": 0.1 if use_vision_model else 0.72,
                     "num_ctx": 4096,
                     "num_predict": 100 if use_vision_model else 256,
+                    "top_p": 0.9,
+                    "repeat_penalty": 1.12,
                 },
             },
         )
@@ -750,6 +885,24 @@ class LocalVoiceOutput:
 class _ChatJob:
     transcript: str | None = None
     proactive_reason: str | None = None
+    source: str = "microphone"
+
+
+def _queue_text_chat_message(
+    text: str,
+    jobs: queue.Queue[_ChatJob | None],
+    scheduler: ProactiveConversationScheduler,
+) -> bool:
+    message = text.strip()
+    if not message:
+        return False
+    try:
+        jobs.put_nowait(_ChatJob(transcript=message, source="keyboard"))
+    except queue.Full:
+        logger.warning("Conversation queue is full; could not enqueue typed chat.")
+        return False
+    scheduler.mark_activity()
+    return True
 
 
 def _publish_event(event_bus: EventBus, event: Event) -> None:
@@ -786,33 +939,50 @@ def run_ai_live(
         raise ValueError("microphone_device must be zero or greater.")
 
     on_status("Loading local speech and vision models. First launch may download several model files.")
+    vision = ExternalMediaPipeBackend()
+    speech = ExternalWhisperBackend(speech_model)
+    chat = ExternalOllamaLanguageBackend(chat_model, vision_model)
+    voice = ExternalSapiSpeechBackend()
+
+    def close_backends() -> None:
+        errors: list[Exception] = []
+        for backend in (voice, chat, speech, vision):
+            try:
+                backend.close()
+            except Exception as exc:  # noqa: BLE001 - continue closing remaining backends
+                errors.append(exc)
+        if errors:
+            raise ExceptionGroup("One or more AI backends failed to close.", errors)
+
+    def cleanup_after_error(error: Exception) -> None:
+        try:
+            close_backends()
+        except Exception as cleanup_error:  # noqa: BLE001 - preserve both failures
+            raise ExceptionGroup(
+                "AI initialization failed and backend cleanup also failed.",
+                [error, cleanup_error],
+            ) from error
+
     try:
-        vision = LocalVisionAnalyzer()
-        speech = LocalSpeechRecognizer(speech_model)
+        vision.initialize()
+        speech.initialize()
+        chat.initialize()
     except Exception as exc:
-        if "vision" in locals():
-            vision.close()
-        if isinstance(exc, LocalInferenceError):
-            raise
-        raise LocalInferenceError(f"Could not initialize local inference models: {exc}") from exc
-    chat = OllamaChat(chat_model, vision_model)
-    try:
-        chat.ensure_ready()
-    except Exception:
-        vision.close()
+        cleanup_after_error(exc)
         raise
 
     try:
         capture = cv2.VideoCapture(camera_index)
     except Exception as exc:
-        vision.close()
+        cleanup_after_error(exc)
         raise LocalInferenceError(f"Could not initialize camera index {camera_index}: {exc}") from exc
     if not capture.isOpened():
         capture.release()
-        vision.close()
-        raise LocalInferenceError(
+        error = LocalInferenceError(
             f"Could not open camera index {camera_index}. Check camera permissions or use --camera-index."
         )
+        cleanup_after_error(error)
+        raise error
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
@@ -833,23 +1003,23 @@ def run_ai_live(
             if selected_device not in input_devices:
                 raise LocalInferenceError(f"Microphone input index {selected_device} is not available.")
         sample_rate = int(sd.query_devices(selected_device, "input")["default_samplerate"])
-    except LocalInferenceError:
+    except LocalInferenceError as exc:
         capture.release()
-        vision.close()
+        cleanup_after_error(exc)
         raise
     except Exception as exc:
         capture.release()
-        vision.close()
+        cleanup_after_error(exc)
         raise LocalInferenceError(
             f"Could not initialize microphone device {microphone_device}: {exc}. "
             "Check Windows microphone privacy permissions and the selected input."
         ) from exc
 
     try:
-        voice = LocalVoiceOutput()
-    except Exception:
+        voice.initialize()
+    except Exception as exc:
         capture.release()
-        vision.close()
+        cleanup_after_error(exc)
         raise
 
     audio_chunks: queue.Queue[Any] = queue.Queue(maxsize=24)
@@ -890,7 +1060,7 @@ def run_ai_live(
             if sample_count < target_count:
                 continue
             try:
-                transcript = speech.transcribe(np.concatenate(buffered), sample_rate)
+                transcript = speech.infer(np.concatenate(buffered), sample_rate)
                 if transcript:
                     state.update_transcript(transcript)
                     scheduler.mark_activity()
@@ -927,20 +1097,42 @@ def run_ai_live(
                 else:
                     answer = chat.initiate(
                         perception,
-                        None,
                         reason=job.proactive_reason or "quiet_pause",
                     )
                 state.update_reply(answer)
                 if answer:
                     voice.speak(answer)
+                    speaker = "typed chat" if job.source == "keyboard" else "microphone"
+                    print(f"\nYou ({speaker}): {job.transcript or '(proactive prompt)'}")
+                    print(f"Cinderella: {answer}\n")
                     on_status("Cinderella replied aloud in Korean.")
                 scheduler.mark_prompted(perception)
             except Exception:
                 logger.exception("Local conversational inference failed.")
 
+    def text_input_worker() -> None:
+        on_status(
+            "Text chat is ready: type a message and press Enter. "
+            "Type /text-off to stop keyboard chat; microphone chat remains active."
+        )
+        while not stopping.is_set():
+            try:
+                message = input("You (text): ").strip()
+            except EOFError:
+                on_status("Console input ended; microphone chat remains active.")
+                return
+            except OSError:
+                logger.exception("Could not read typed chat input.")
+                return
+            if message.casefold() == "/text-off":
+                on_status("Keyboard chat stopped; microphone chat remains active.")
+                return
+            _queue_text_chat_message(message, transcript_jobs, scheduler)
+
     workers = [
         threading.Thread(target=transcribe_worker, name="speech-transcriber", daemon=True),
         threading.Thread(target=chat_worker, name="local-chat", daemon=True),
+        threading.Thread(target=text_input_worker, name="typed-chat-input", daemon=True),
     ]
     stream_started = False
 
@@ -965,9 +1157,9 @@ def run_ai_live(
         on_status(
             f"Local AI active (camera {camera_index}, microphone {selected_device}, "
             f"Whisper {speech_model}, Ollama text {chat_model}, vision {vision_model}). "
-            "Korean offline voice enabled; "
+            "Korean offline voice and terminal text chat enabled; "
             "no media is saved or sent outside this computer. Speak naturally to interrupt; "
-            "press Q or Esc to stop. Headphones reduce speaker echo."
+            "type in the terminal to chat; press Q or Esc to stop. Headphones reduce speaker echo."
         )
         last_timestamp_ms = 0
         last_vision_at = 0.0
@@ -979,7 +1171,7 @@ def run_ai_live(
             if now - last_vision_at >= VISION_INTERVAL_SECONDS:
                 timestamp_ms = max(last_timestamp_ms + 1, int(now * 1000))
                 last_timestamp_ms = timestamp_ms
-                snapshot = vision.analyze(frame, timestamp_ms)
+                snapshot = vision.infer(frame, now)
                 state.update_perception(snapshot)
                 encoded_ok, encoded_frame = cv2.imencode(
                     ".jpg",
@@ -998,6 +1190,22 @@ def run_ai_live(
                                 "laptop_camera",
                                 payload={
                                     "objects": list(snapshot.objects),
+                                    "detections": [
+                                        {
+                                            "class_id": detection.class_id,
+                                            "label": detection.label,
+                                            "confidence": detection.confidence,
+                                            "track_id": detection.track_id,
+                                            "bbox": {
+                                                "x_min": detection.box.x_min,
+                                                "y_min": detection.box.y_min,
+                                                "x_max": detection.box.x_max,
+                                                "y_max": detection.box.y_max,
+                                            },
+                                        }
+                                        for detection in (snapshot.detections.stable_detections if snapshot.detections else ())
+                                        if detection.state == DetectionState.STABLE
+                                    ],
                                     "local_inference": True,
                                 },
                                 confidence=snapshot.confidence,
@@ -1052,6 +1260,25 @@ def run_ai_live(
                     scheduler.mark_prompted(snapshot, now=now)
 
             snapshot, _, _ = state.read()
+            if snapshot.detections is not None:
+                height, width = frame.shape[:2]
+                for detection in snapshot.detections.stable_detections:
+                    if detection.state != DetectionState.STABLE:
+                        continue
+                    left = round(detection.box.x_min * width)
+                    top = round(detection.box.y_min * height)
+                    right = round(detection.box.x_max * width)
+                    bottom = round(detection.box.y_max * height)
+                    cv2.rectangle(frame, (left, top), (right, bottom), (40, 220, 40), 2)
+                    cv2.putText(
+                        frame,
+                        f"{detection.label} {detection.confidence:.2f}",
+                        (left, max(18, top - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (40, 220, 40),
+                        1,
+                    )
             lines = [
                 f"Objects: {', '.join(snapshot.objects) or 'none detected'}",
                 f"Pose cues: {', '.join(snapshot.action_cues) or 'none detected'}",
@@ -1104,12 +1331,9 @@ def run_ai_live(
                     capture.release()
                 finally:
                     try:
-                        voice.close()
+                        cv2.destroyAllWindows()
                     finally:
-                        try:
-                            cv2.destroyAllWindows()
-                        finally:
-                            vision.close()
+                        close_backends()
 
 
 def _visual_chat_frame(cv2: Any, frame: Any) -> Any:

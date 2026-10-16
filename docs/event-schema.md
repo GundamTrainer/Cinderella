@@ -60,6 +60,12 @@ The opt-in local AI runtime uses `speech.final_transcript`, `vision.objects_dete
 `vision.action_detected`, and `vision.expression_cues_detected` for transient inference results.
 These events are not persisted by the runtime.
 
+For `vision.objects_detected`, `payload.objects` contains confirmed labels after temporal
+stabilization. `payload.detections` contains those detections with class ID, label, confidence,
+track ID, and normalized `bbox` coordinates (`x_min`, `y_min`, `x_max`, `y_max`). Raw and
+unverified detector proposals remain available in the in-process `DetectionFrame`; they are not
+reported as confirmed object labels.
+
 ## Serialization behavior
 
 Events can be serialized to JSON and restored from JSON by round-tripping the dictionary representation. The dataclass structure and field semantics are preserved across serialization boundaries.
