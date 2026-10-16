@@ -44,11 +44,21 @@ Confirmed object labels require valid class metadata, supported class IDs, confi
 
 Microphone callbacks hand copied sample chunks to a bounded queue configured by `audio_input_queue_capacity` (default: 24). Device overflow, dropped chunks, queue pressure, transcription acceptance/rejection, and TTS echo-guard discards are accumulated as counts and published as typed events. Sequence gaps and overflow markers prevent audio on opposite sides of a gap from being combined into one transcription window. Diagnostic event payloads contain counts and reason codes only, not samples or transcripts.
 
-The live camera overlay also displays an equal-weight feature implementation coverage indicator. The six areas are reply (50%), situation cues (50%), tentative affect hypotheses (25%), person detection (50%), object detection (50%), and conversational turn-taking (100%), yielding 54% overall. The 25% affect entry is a small, uncalibrated rule-based prototype that requires human confirmation; it is not emotion recognition. These percentages are coarse status estimates, not measures of human similarity, recognition accuracy, emotional understanding, or benchmark performance. Refer to [physical-ai.md](physical-ai.md) for the simulation-only action boundary and [evaluation.md](evaluation.md) for actual quality measurement.
+The former 54% estimate has been removed from the normal live overlay. A developer-only helper remains for compatibility with existing tests; `runtime.capabilities.capability_statuses()` is the preferred provenance/status view. Its static entries are not live health checks. Refer to [physical-ai.md](physical-ai.md) for the simulation-only action boundary and [evaluation.md](evaluation.md) for actual quality measurement.
 
 ### Orchestrator
 
 The orchestrator is responsible for initializing components, starting them, consuming the event bus, and safely tearing down components in reverse order on shutdown or partial initialization failure.
+
+### Integrations and companion state
+
+`integrations/` provides provider contracts, default-deny metadata validation, four network modes, exact HTTPS host allowlists, redirect revalidation, response-size caps, bounded retries, and a bounded in-memory cache. Registration does not discover providers or make requests. The CLI and live conversation do not instantiate the registry.
+
+MediaWiki and Open-Meteo adapters use injectable JSON transports, so unit tests do not use live network access. MediaWiki remains blocked until query-data retention is confirmed. Open-Meteo is blocked by the paid-service policy. Local status and caller-supplied approved records work without network.
+
+`runtime/companion_state.py` defines identity, relationship, goal, memory, and response-plan models. `runtime/state_store.py` provides explicit local SQLite persistence; it writes nothing unless called and requires explicit consent before persisting memory. These models are not yet connected to the chat loop, automatically learned, or executed as autonomous actions.
+
+External backend construction is centralized in `runtime/backend_factory.py`, but legacy model implementations and Ollama HTTP code remain in `runtime/ai_pipeline.py`. Backend isolation is partial, not complete; see [external-backends.md](external-backends.md).
 
 ## Planned functionality
 

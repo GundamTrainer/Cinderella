@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from integrations.policies import NetworkMode, NetworkPolicy
 
 
 class ConfigurationError(ValueError):
@@ -26,6 +28,7 @@ class RuntimeSettings:
     microphone_device: int | None = None
     box_clamp_tolerance_pixels: float = 2.0
     audio_input_queue_capacity: int = 24
+    network: NetworkPolicy = field(default_factory=NetworkPolicy)
 
     @classmethod
     def from_mapping(cls, values: dict[str, Any]) -> RuntimeSettings:
@@ -45,6 +48,12 @@ class RuntimeSettings:
                 values.get("box_clamp_tolerance_pixels", 2.0)
             )
             audio_input_queue_capacity = int(values.get("audio_input_queue_capacity", 24))
+            network_values = values.get("network", {})
+            if not isinstance(network_values, dict):
+                raise ConfigurationError("network must be a mapping.")
+            network = _network_policy_from_mapping(network_values)
+        except ConfigurationError:
+            raise
         except KeyError as exc:  # pragma: no cover - defensive
             raise ConfigurationError(f"Missing required config key: {exc.args[0]}") from exc
         except (TypeError, ValueError) as exc:
@@ -84,6 +93,7 @@ class RuntimeSettings:
             microphone_device=microphone_device,
             box_clamp_tolerance_pixels=box_clamp_tolerance_pixels,
             audio_input_queue_capacity=audio_input_queue_capacity,
+            network=network,
         )
 
 
@@ -98,6 +108,18 @@ def _parse_scalar(raw: str) -> Any:
         return lowered == "true"
     if lowered in {"null", "none"}:
         return None
+    if value == "[]":
+        return []
+    if value.startswith("[") and value.endswith("]"):
+        try:
+            import json
+
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ConfigurationError(f"Invalid inline list value: {value!r}") from exc
+        if not isinstance(parsed, list):
+            raise ConfigurationError(f"Expected a list value, got {value!r}.")
+        return parsed
     if value.startswith(('"', "'")) and value.endswith(('"', "'")):
         return value[1:-1]
     if "." in value:
@@ -113,8 +135,19 @@ def _parse_scalar(raw: str) -> Any:
 
 def _load_simple_yaml(path: Path) -> dict[str, Any]:
     mapping: dict[str, Any] = {}
+    current_section: dict[str, Any] | None = None
     for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indentation = len(raw_line) - len(raw_line.lstrip())
+        if indentation == 0 and raw_line.rstrip().endswith(":"):
+            section_name = raw_line.strip()[:-1].strip()
+            if not section_name or section_name in mapping:
+                raise ConfigurationError(
+                    f"Invalid or duplicate config section at line {line_number}."
+                )
+            current_section = {}
+            mapping[section_name] = current_section
             continue
         if ":" not in raw_line:
             raise ConfigurationError(f"Invalid YAML syntax at line {line_number}: {raw_line!r}")
@@ -122,8 +155,88 @@ def _load_simple_yaml(path: Path) -> dict[str, Any]:
         key = key.strip()
         if not key:
             raise ConfigurationError(f"Missing config key at line {line_number}: {raw_line!r}")
-        mapping[key] = _parse_scalar(raw_value)
+        if indentation:
+            if indentation != 2 or current_section is None:
+                raise ConfigurationError(f"Invalid indentation at line {line_number}.")
+            if key in current_section:
+                raise ConfigurationError(f"Duplicate config key at line {line_number}: {key!r}.")
+            current_section[key] = _parse_scalar(raw_value)
+        else:
+            if key in mapping:
+                raise ConfigurationError(f"Duplicate config key at line {line_number}: {key!r}.")
+            mapping[key] = _parse_scalar(raw_value)
+            current_section = None
     return mapping
+
+
+def _network_policy_from_mapping(values: dict[str, Any]) -> NetworkPolicy:
+    defaults = NetworkPolicy()
+    permitted = {
+        "mode",
+        "allow_external_requests",
+        "allowed_domains",
+        "require_user_confirmation_for_new_domain",
+        "request_timeout_seconds",
+        "retry_count",
+        "maximum_response_bytes",
+        "user_agent",
+        "cache_enabled",
+        "redact_query_logs",
+    }
+    unknown = set(values) - permitted
+    if unknown:
+        raise ConfigurationError(f"Unknown network config key(s): {', '.join(sorted(unknown))}.")
+    try:
+        mode = NetworkMode(values.get("mode", defaults.mode.value))
+        allow_external_requests = values.get(
+            "allow_external_requests", defaults.allow_external_requests
+        )
+        allowed_domains = values.get("allowed_domains", list(defaults.allowed_domains))
+        require_confirmation = values.get(
+            "require_user_confirmation_for_new_domain",
+            defaults.require_user_confirmation_for_new_domain,
+        )
+        timeout = values.get("request_timeout_seconds", defaults.request_timeout_seconds)
+        retries = values.get("retry_count", defaults.retry_count)
+        maximum_bytes = values.get("maximum_response_bytes", defaults.maximum_response_bytes)
+        user_agent = values.get("user_agent", defaults.user_agent)
+        cache_enabled = values.get("cache_enabled", defaults.cache_enabled)
+        redact_query_logs = values.get("redact_query_logs", defaults.redact_query_logs)
+        for key, value in (
+            ("allow_external_requests", allow_external_requests),
+            ("require_user_confirmation_for_new_domain", require_confirmation),
+            ("cache_enabled", cache_enabled),
+            ("redact_query_logs", redact_query_logs),
+        ):
+            if not isinstance(value, bool):
+                raise TypeError(f"network.{key} must be a boolean.")
+        if (
+            not isinstance(allowed_domains, list)
+            or any(not isinstance(domain, str) for domain in allowed_domains)
+        ):
+            raise TypeError("network.allowed_domains must be a list of hostnames.")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise TypeError("network.request_timeout_seconds must be numeric.")
+        if isinstance(retries, bool) or not isinstance(retries, int):
+            raise TypeError("network.retry_count must be an integer.")
+        if isinstance(maximum_bytes, bool) or not isinstance(maximum_bytes, int):
+            raise TypeError("network.maximum_response_bytes must be an integer.")
+        if not isinstance(user_agent, str):
+            raise TypeError("network.user_agent must be a string.")
+        return NetworkPolicy(
+            mode=mode,
+            allow_external_requests=allow_external_requests,
+            allowed_domains=tuple(allowed_domains),
+            require_user_confirmation_for_new_domain=require_confirmation,
+            request_timeout_seconds=float(timeout),
+            retry_count=retries,
+            maximum_response_bytes=maximum_bytes,
+            user_agent=user_agent,
+            cache_enabled=cache_enabled,
+            redact_query_logs=redact_query_logs,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(f"Invalid network configuration: {exc}") from exc
 
 
 def load_runtime_settings(path: str | Path | None = None) -> RuntimeSettings:

@@ -10,3 +10,14 @@ camera_index: 0
 microphone_device: null
 box_clamp_tolerance_pixels: 2.0
 audio_input_queue_capacity: 24
+network:
+  mode: offline
+  allow_external_requests: false
+  allowed_domains: ["en.wikipedia.org", "api.open-meteo.com"]
+  require_user_confirmation_for_new_domain: true
+  request_timeout_seconds: 8
+  retry_count: 1
+  maximum_response_bytes: 1000000
+  user_agent: "Cinderella/0.1.0"
+  cache_enabled: true
+  redact_query_logs: true

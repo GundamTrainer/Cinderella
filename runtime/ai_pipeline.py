@@ -18,12 +18,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from ai.external_backends import (
-    ExternalMediaPipeBackend,
-    ExternalOllamaLanguageBackend,
-    ExternalSapiSpeechBackend,
-    ExternalWhisperBackend,
-)
 from ai.scene import (
     InterpretationHypothesis,
     SceneObservation,
@@ -40,7 +34,7 @@ from ai.vision import (
     convert_detector_results,
 )
 from runtime.audio_stream import AudioInputBuffer
-from runtime.capabilities import capability_overlay_lines
+from runtime.backend_factory import create_live_backends
 
 from .event_bus import Event, EventBus, EventBusFullError, EventType
 
@@ -1034,10 +1028,16 @@ def run_ai_live(
     on_status(
         "Loading local speech and vision models. First launch may download several model files."
     )
-    vision = ExternalMediaPipeBackend(box_clamp_tolerance_pixels=box_clamp_tolerance_pixels)
-    speech = ExternalWhisperBackend(speech_model)
-    chat = ExternalOllamaLanguageBackend(chat_model, vision_model)
-    voice = ExternalSapiSpeechBackend()
+    backends = create_live_backends(
+        speech_model=speech_model,
+        chat_model=chat_model,
+        vision_model=vision_model,
+        box_clamp_tolerance_pixels=box_clamp_tolerance_pixels,
+    )
+    vision = backends.vision
+    speech = backends.speech
+    chat = backends.chat
+    voice = backends.voice
 
     def close_backends() -> None:
         errors: list[Exception] = []
@@ -1430,7 +1430,6 @@ def run_ai_live(
                         1,
                     )
             lines = [
-                *capability_overlay_lines(),
                 f"Objects: {', '.join(snapshot.objects) or 'none detected'}",
                 f"Pose cues: {', '.join(snapshot.action_cues) or 'none detected'}",
                 f"Expression cues (not emotion): {', '.join(snapshot.expression_cues) or 'none detected'}",

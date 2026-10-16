@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from math import hypot, isfinite
 
 from .vision import BoundingBox, DetectionFrame, DetectionState, FaceFeatureFrame
@@ -42,6 +43,22 @@ class InterpretationHypothesis:
     uncertainty: str = "unknown"
     valid_until: float | None = None
     requires_confirmation: bool = True
+    hypothesis_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    source_types: tuple[str, ...] = ("unspecified",)
+    sensitive: bool = False
+    allowed_for_speech: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.hypothesis_id.strip() or not self.hypothesis.strip():
+            raise ValueError("hypothesis_id and hypothesis label must not be empty.")
+        if not isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("hypothesis confidence must be finite and between 0 and 1.")
+        if self.sensitive and self.allowed_for_speech:
+            raise ValueError("Sensitive hypotheses cannot be allowed for speech.")
+
+    @property
+    def label(self) -> str:
+        return self.hypothesis
 
 
 def tentative_affect_hypotheses(
@@ -77,6 +94,8 @@ def tentative_affect_hypotheses(
                     uncertainty="high; heuristic and not calibrated",
                     valid_until=observed_at + lifetime_seconds,
                     requires_confirmation=True,
+                    source_types=("visual_facial_movement",),
+                    allowed_for_speech=True,
                 )
             )
     return tuple(hypotheses)

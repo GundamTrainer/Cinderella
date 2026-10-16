@@ -10,6 +10,14 @@ The simulation components emit synthetic metadata only. Separate, opt-in laptop 
 
 The microphone callback uses a bounded queue and records only aggregate event counts and reason codes for overflow, dropped chunks, queue pressure, and rejected/accepted segments. Diagnostic logs and events do not contain raw samples, frames, transcripts, or face-feature vectors. Brief in-memory audio chunks and the current visual thumbnail are still used for live inference.
 
+## Provider and persistence boundaries
+
+External information providers are not called by the CLI or live chat. Network mode defaults to offline and external requests are disabled. Camera frames and audio are prohibited provider inputs; the provider policy rejects personal data. Search terms are still sent to a provider when a search is explicitly permitted, so retention policy must be reviewed. MediaWiki is blocked while query-data retention is unconfirmed. Open-Meteo is blocked because paid commercial and paid-data tiers exist.
+
+`SQLiteStateStore` requires a path explicitly supplied by the caller and is not automatically initialized. Persistent memory writes require explicit user confirmation and consent; external facts cannot be stored as personal memory. Individual and category deletion, correction, inspection, and memory disablement are available in the storage API. SQLite/database files are ignored by Git.
+
+There is no user-facing provider enablement or memory-consent/inspection UI yet. Do not connect these APIs to live chat until those controls exist.
+
 ## Planned privacy controls
 
 Future multimodal processing components must implement explicit privacy boundaries before any additional recognition, inference, or persistence is added. This includes:

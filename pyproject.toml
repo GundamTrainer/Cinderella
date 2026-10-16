@@ -1,7 +1,7 @@
 [project]
 name = "cinderella"
 version = "0.1.0"
-description = "Self-developed multimodal physical character AI"
+description = "Local multimodal runtime with opt-in tools and simulated physical-AI workflows"
 requires-python = ">=3.12"
 dependencies = []
 
@@ -21,7 +21,7 @@ ai = [
 ]
 
 [tool.setuptools]
-packages = ["ai", "datasets", "datasets.object_detection", "runtime", "runtime.event_bus"]
+packages = ["ai", "datasets", "datasets.object_detection", "integrations", "integrations.providers", "runtime", "runtime.event_bus"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

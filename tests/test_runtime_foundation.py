@@ -18,7 +18,12 @@ from runtime.ai_pipeline import (
     facial_expression_cues,
     raised_arm_cues,
 )
-from runtime.capabilities import capability_overlay_lines, implementation_coverage_percent
+from runtime.capabilities import (
+    CapabilityStatus,
+    capability_overlay_lines,
+    capability_statuses,
+    implementation_coverage_percent,
+)
 from runtime.component import Component, ComponentState, InvalidStateTransitionError
 from runtime.config import ConfigurationError, RuntimeSettings, load_runtime_settings
 from runtime.event_bus import Event, EventBus, EventBusClosedError, EventBusFullError, EventType
@@ -36,10 +41,20 @@ from runtime.simulators import SimulatedAudioSource, SimulatedHardwareAdapter, S
 def test_capability_overlay_reports_implementation_coverage_not_human_similarity() -> None:
     assert implementation_coverage_percent() == 54
     assert capability_overlay_lines() == (
-        "Feature implementation coverage: 54% (not human similarity or accuracy)",
+        "Developer estimate only: 54% (not human similarity or accuracy)",
         "Reply 50% | Situation 50% | Affect cues 25% | Person 50%",
         "Object 50% | Dialogue 100%",
     )
+
+
+def test_capability_statuses_are_provenance_not_an_accuracy_percentage() -> None:
+    statuses = capability_statuses()
+    by_name = {item.name: item for item in statuses}
+
+    assert by_name["speech_recognition"].status == CapabilityStatus.DISABLED
+    assert by_name["speech_recognition"].implementation_type == "external"
+    assert by_name["simulated_physical_actions"].status == CapabilityStatus.SIMULATED
+    assert by_name["external_information_tools"].status == CapabilityStatus.DISABLED
 
 
 def test_physical_ai_simulation_emits_proposal_safety_and_simulated_command() -> None:
@@ -341,6 +356,9 @@ def test_runtime_settings_load_valid_file() -> None:
     assert settings.logging_level == "INFO"
     assert settings.audio_simulator_enabled is True
     assert settings.audio_input_queue_capacity == 24
+    assert settings.network.mode.value == "offline"
+    assert settings.network.allow_external_requests is False
+    assert settings.network.allowed_domains == ("en.wikipedia.org", "api.open-meteo.com")
 
 
 def test_runtime_settings_reject_invalid_audio_queue_capacity() -> None:

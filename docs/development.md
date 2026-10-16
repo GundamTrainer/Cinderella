@@ -4,6 +4,8 @@
 
 The runtime foundation uses the Python standard library and pytest. Real camera and microphone support is optional and uses OpenCV and sounddevice. Local inference additionally uses faster-whisper and MediaPipe Tasks. Python 3.14 is recommended; the existing Python 3.15 environment may not have wheels for all inference dependencies.
 
+The new integration and companion-state modules also use only the standard library. No HTTP, YAML, cache, or SQLite package dependency was added.
+
 ## Local camera and microphone preview
 
 Create a supported Python environment and install the optional device and AI dependencies (PowerShell):
@@ -38,7 +40,9 @@ The first run fetches the Whisper `small` weights and MediaPipe task assets to t
 
 The default settings are in `configs/default.yaml`. `box_clamp_tolerance_pixels` bounds how far detector boxes may exceed the camera frame before rejection; `audio_input_queue_capacity` limits callback-to-worker buffering. Invalid or unsupported detections stay unverified, and repeated object observations are required before a label is exposed as stable. This validation/stabilization layer does not improve the pretrained detector's underlying accuracy.
 
-The live window reports **feature implementation coverage**, currently 54%: an equal-weight average of coarse feature-status estimates for reply, situation cues, tentative affect hypotheses, person detection, object detection, and conversational turn-taking. A limited feature is rated 50%, the small uncalibrated affect heuristic is 25%, and an implemented interaction path is 100%. This is a documented status rubric—not a measurement of how human Cinderella is, how accurately a model performs, or how well it understands emotions. Affect hypotheses have low confidence and require confirmation; no validated emotion classifier exists.
+The nested `network` settings are separate from model downloads and loopback Ollama. New public information providers are offline by default and are not started by the CLI.
+
+The former 54% developer estimate is no longer shown in the live window. It was a coarse implementation-status rubric, not a measurement of human similarity, accuracy, or emotional understanding. No validated emotion classifier exists.
 
 AI chat communicates only with the local Ollama service over loopback. Regular conversation uses the text model. When the recognized utterance or typed message asks about the camera view, the vision model receives a temporary JPEG thumbnail (maximum 448 pixels on its longest side); that image is not retained in conversation history or written to disk. Visual answers can be slow on CPU-only systems. Real-time object labels still use MediaPipe EfficientDet Lite2 and are limited to its COCO categories; use an explicit visual question to ask the local vision-language model about a scene. Speech is produced with the Korean voice installed in Windows; no audio is sent to a speech service. The conversation scheduler waits at least a minute after activity and uses jittered quiet intervals or stable visible cues; it does not infer mood. Basic interruption detection compares sustained mic input with initial speaker echo, so headphones are recommended.
 
@@ -63,6 +67,17 @@ Review the respective project/model license terms before redistribution or comme
 5. On shutdown, stop components in reverse order and close them safely.
 
 The optional live AI mode has its own device/model lifecycle in `runtime/ai_pipeline.py`; it is separate from the deterministic simulated orchestrator. Object annotation manifests use the schema in [dataset-format.md](dataset-format.md). The evaluation helper and its current limitations are documented in [evaluation.md](evaluation.md).
+
+Provider tests must use an injected `JsonTransport`; pytest must not call public endpoints. Provider metadata is validated before activation, and there is no hidden policy bypass. Open-Meteo currently fails the payment/paid-tier policy; MediaWiki fails until query-data retention is confirmed. Initialize `SQLiteStateStore` only with an explicit destination path.
+
+An opt-in smoke command is available for a future provider that passes policy review:
+
+```powershell
+.\.venv314\Scripts\python.exe -m tools.provider_smoke --provider mediawiki --allow-network --confirm-query-text --query "sample topic"
+.\.venv314\Scripts\python.exe -m tools.provider_smoke --provider open-meteo --allow-network --confirm-location-transfer --latitude 37.5665 --longitude 126.9780
+```
+
+Both commands currently stop at provider policy validation and make no request. Do not remove the confirmation flags or treat this command as a policy override.
 
 ## Validation commands
 

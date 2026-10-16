@@ -17,7 +17,12 @@ from ai.external_backends import (
     ExternalSapiSpeechBackend,
     ExternalWhisperBackend,
 )
-from ai.scene import SceneObservation, WorldStateTracker, tentative_affect_hypotheses
+from ai.scene import (
+    InterpretationHypothesis,
+    SceneObservation,
+    WorldStateTracker,
+    tentative_affect_hypotheses,
+)
 from ai.vision import (
     BoundingBox,
     CoordinateSpace,
@@ -353,7 +358,19 @@ def test_tentative_affect_hypothesis_is_low_confidence_and_requires_confirmation
     assert hypotheses[0].uncertainty.startswith("high")
     assert hypotheses[0].requires_confirmation
     assert hypotheses[0].valid_until == 7.0
+    assert hypotheses[0].source_types == ("visual_facial_movement",)
+    assert hypotheses[0].label == "possible_positive_affect"
     assert tentative_affect_hypotheses((), observed_at=5.0) == ()
+
+
+def test_sensitive_hypotheses_cannot_be_allowed_for_speech() -> None:
+    with pytest.raises(ValueError, match="Sensitive hypotheses"):
+        InterpretationHypothesis(
+            hypothesis="sensitive",
+            supporting_observations=("unverified cue",),
+            sensitive=True,
+            allowed_for_speech=True,
+        )
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,6 @@
 # Cinderella
 
-Cinderella is a self-developed multimodal character AI project. The repository includes a minimal runtime foundation and an opt-in local camera/microphone AI mode. The live AI mode currently wraps separately maintained local/external backends; it does not yet contain self-trained models.
+Cinderella is a local multimodal runtime project with an opt-in camera/microphone AI mode. The live mode currently depends on separately maintained local/external backends; this repository does not contain self-trained speech, vision, or language models and does not establish human-like feelings or consciousness.
 
 ## Current implementation status
 
@@ -15,7 +15,11 @@ Implemented:
 - opt-in local Whisper transcription, MediaPipe object/pose/face-movement inference, local image-aware Ollama conversation, and offline Korean speech output, with external-backend provenance adapters; concrete model implementations are not yet fully separated from the live pipeline
 - validated object observations that distinguish invalid, unsupported, low-confidence, and unstable results; normalized boxes are clamped only within a small frame-edge tolerance and stable labels require repeated detections. This improves result handling and consistency, not detector accuracy.
 - short-lived world-state observations with coarse object regions and motion cues, plus bounded microphone buffering with overflow, drop, queue-pressure, and segment diagnostics
-- live overlay showing an equal-weight feature implementation coverage estimate (currently 54%); it is not a human-similarity or accuracy score
+- typed capability provenance/status records; the former 54% estimate is retained only as a developer helper and is no longer shown in the live overlay
+- opt-in provider contracts, conservative policy validation, HTTPS allowlisting, redirect checks, response-size limits, bounded retries, and TTL caching
+- offline-first provider scaffolding for MediaWiki, Open-Meteo, local status, approved static records, citations, and single-tool decision plans
+- local SQLite persistence APIs for identity, relationship, and explicitly consented memories; not automatically connected to chat or initialized by the CLI
+- typed identity-change review, evidence-bound relationship changes, approval-gated goals, and source-aware response plans
 - tentative facial-cue hypotheses marked low-confidence and requiring user confirmation; these are not validated emotion recognition
 - object-detection annotation validation and a basic class-aware IoU evaluation helper
 - quiet-pause and stable visual-cue conversation prompts, with basic speech-interruption detection
@@ -28,7 +32,10 @@ Not implemented yet:
 - emotion diagnosis (appearance and voice cues cannot establish a person's true emotional state)
 - hardware device drivers
 - voice cloning or character voice profiles
-- external AI APIs; network is used only for first-time model downloads
+- automatic provider requests from chat or the CLI
+- an operational Wikidata provider, face identity enrollment, automatic memory learning, autonomous goal execution, or integrated consent UI
+
+New information providers remain offline and disabled by default. MediaWiki is blocked until query-data retention is verified. Open-Meteo is blocked by the required policy because its service offers paid/commercial and paid-data tiers; there is no override. The provider classes are not connected to the live conversation pipeline. See [docs/integrations.md](docs/integrations.md), [docs/provider-policy.md](docs/provider-policy.md), and [docs/offline-operation.md](docs/offline-operation.md).
 
 ## Runtime foundation
 
@@ -41,6 +48,8 @@ To inspect the simulation-only physical-AI action/safety flow without opening ha
 ```
 
 The demo emits JSON proposal/decision/simulated-command events; it does not actuate devices. Research boundaries and limitations are documented in [docs/physical-ai.md](docs/physical-ai.md).
+
+The live-window 54% estimate was removed. It was a rough developer-status calculation, not an accuracy or human-similarity measure.
 
 ## Quick start
 
