@@ -15,6 +15,7 @@ Implemented:
 - opt-in local Whisper transcription, MediaPipe object/pose/face-movement inference, local image-aware Ollama conversation, and offline Korean speech output, with external-backend provenance adapters; concrete model implementations are not yet fully separated from the live pipeline
 - validated object observations that distinguish invalid, unsupported, low-confidence, and unstable results; normalized boxes are clamped only within a small frame-edge tolerance and stable labels require repeated detections. This improves result handling and consistency, not detector accuracy.
 - short-lived world-state observations with coarse object regions and motion cues, plus bounded microphone buffering with overflow, drop, queue-pressure, and segment diagnostics
+- live overlay showing an equal-weight feature implementation coverage estimate (currently 50%); it is not a human-similarity or accuracy score
 - object-detection annotation validation and a basic class-aware IoU evaluation helper
 - quiet-pause and stable visual-cue conversation prompts, with basic speech-interruption detection
 - pytest coverage for the runtime foundation

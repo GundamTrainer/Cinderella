@@ -17,12 +17,22 @@ from runtime.ai_pipeline import (
     facial_expression_cues,
     raised_arm_cues,
 )
+from runtime.capabilities import capability_overlay_lines, implementation_coverage_percent
 from runtime.component import Component, ComponentState, InvalidStateTransitionError
 from runtime.config import ConfigurationError, RuntimeSettings, load_runtime_settings
 from runtime.event_bus import Event, EventBus, EventBusClosedError, EventBusFullError, EventType
 from runtime.laptop_io import LaptopDeviceError, _audio_rms
 from runtime.orchestrator import RuntimeOrchestrator
 from runtime.simulators import SimulatedAudioSource, SimulatedHardwareAdapter, SimulatedVisionSource
+
+
+def test_capability_overlay_reports_implementation_coverage_not_human_similarity() -> None:
+    assert implementation_coverage_percent() == 50
+    assert capability_overlay_lines() == (
+        "Feature implementation coverage: 50% (not human similarity)",
+        "Reply 50% | Situation 50% | Emotion 0% | Person 50%",
+        "Object 50% | Dialogue 100%",
+    )
 
 
 class DummyComponent(Component):

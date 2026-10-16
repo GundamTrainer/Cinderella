@@ -44,6 +44,8 @@ Confirmed object labels require valid class metadata, supported class IDs, confi
 
 Microphone callbacks hand copied sample chunks to a bounded queue configured by `audio_input_queue_capacity` (default: 24). Device overflow, dropped chunks, queue pressure, transcription acceptance/rejection, and TTS echo-guard discards are accumulated as counts and published as typed events. Sequence gaps and overflow markers prevent audio on opposite sides of a gap from being combined into one transcription window. Diagnostic event payloads contain counts and reason codes only, not samples or transcripts.
 
+The live camera overlay also displays an equal-weight feature implementation coverage indicator. The six areas are reply (50%), situation cues (50%), emotion diagnosis (0%), person detection (50%), object detection (50%), and conversational turn-taking (100%), yielding 50% overall. Each area is a coarse implementation-status estimate: 0% means absent, 50% means a limited/partial capability exists, and 100% means the interaction path is implemented, not that its quality is human-level. The score is not a measure of human similarity, recognition accuracy, emotional understanding, or benchmark performance. Emotion diagnosis is not implemented; facial movement cues are not interpreted as a person's emotional state.
+
 ### Orchestrator
 
 The orchestrator is responsible for initializing components, starting them, consuming the event bus, and safely tearing down components in reverse order on shutdown or partial initialization failure.

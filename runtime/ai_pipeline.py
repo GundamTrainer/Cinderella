@@ -34,6 +34,7 @@ from ai.vision import (
     convert_detector_results,
 )
 from runtime.audio_stream import AudioInputBuffer
+from runtime.capabilities import capability_overlay_lines
 
 from .event_bus import Event, EventBus, EventBusFullError, EventType
 
@@ -1406,6 +1407,7 @@ def run_ai_live(
                         1,
                     )
             lines = [
+                *capability_overlay_lines(),
                 f"Objects: {', '.join(snapshot.objects) or 'none detected'}",
                 f"Pose cues: {', '.join(snapshot.action_cues) or 'none detected'}",
                 f"Expression cues (not emotion): {', '.join(snapshot.expression_cues) or 'none detected'}",
@@ -1414,7 +1416,7 @@ def run_ai_live(
                 cv2.putText(
                     frame,
                     line,
-                    (12, 25 + index * 25),
+                    (12, 25 + index * 24),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.55,
                     (40, 220, 40),
