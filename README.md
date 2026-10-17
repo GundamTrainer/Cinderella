@@ -52,45 +52,89 @@ The demo emits JSON proposal/decision/simulated-command events; it does not actu
 
 The live-window 54% estimate was removed. It was a rough developer-status calculation, not an accuracy or human-similarity measure.
 
-## Quick start
+## 빠른 시작
 
 ```bash
 python -m pytest
 ```
 
-## Local laptop preview and AI mode
+위 명령은 테스트를 실행합니다. 카메라나 AI를 시작하는 명령은 아닙니다.
 
-Create a Python 3.14 environment, then install hardware and local AI dependencies (PowerShell):
+## 노트북 카메라·마이크 및 실시간 AI 실행 (Windows)
+
+### 1. 필요한 프로그램 설치
+
+Python 3.14가 필요합니다. Ollama도 별도로 설치하고 실행해야 합니다. 실시간 AI 모드는 카메라·마이크 장치와 로컬 AI 모델을 사용합니다.
+
+아래 Git Bash 명령은 저장소 폴더에서 실행합니다. 백슬래시(`\`)는 Bash에서 Windows 경로 구분자로 쓸 수 없으므로 `./`와 슬래시(`/`)를 사용합니다. 가상환경은 처음 한 번만 만들면 됩니다.
 
 ```bash
 py -3.14 -m venv .venv314
+./.venv314/Scripts/python.exe --version
+./.venv314/Scripts/python.exe -m pip install -e '.[dev,hardware,ai]'
+```
+
+버전 확인 결과가 `Python 3.14.x`인지 확인하세요. 설치와 실행 명령에는 반드시 `.venv314` 안의 `python.exe`를 사용해야 합니다. 터미널에 이미 활성화된 `.venv`의 `python.exe`를 사용하면 Python 3.15일 수 있으며, 이 경우 `ctranslate2` 같은 AI 패키지를 설치할 수 없습니다.
+
+PowerShell을 사용한다면 위 설치 명령은 다음과 같습니다.
+
+```powershell
+py -3.14 -m venv .venv314
+.\.venv314\Scripts\python.exe --version
 .\.venv314\Scripts\python.exe -m pip install -e ".[dev,hardware,ai]"
 ```
 
-List devices and run the lightweight preview:
+### 2. 카메라와 마이크 확인
+
+연결된 장치를 확인합니다.
 
 ```bash
-.\.venv314\Scripts\python.exe main.py --devices
-.\.venv314\Scripts\python.exe main.py --preview
+./.venv314/Scripts/python.exe main.py --devices
 ```
 
-Install Ollama and download the local vision-and-chat model:
+카메라 영상과 마이크 입력 레벨만 확인하려면 다음 명령을 실행합니다. 이 미리보기는 녹화하거나 AI 분석을 하지 않습니다.
 
 ```bash
+./.venv314/Scripts/python.exe main.py --preview
+```
+
+창을 닫으려면 카메라 미리보기 창을 클릭한 뒤 `Q` 또는 `Esc`를 누릅니다. 노트북 내장 마이크 배열을 직접 지정하려면 `--microphone-device 32`를 추가합니다.
+
+### 3. 로컬 AI 모델 준비
+
+Ollama를 설치하고 실행한 다음, Git Bash 또는 PowerShell에서 대화·비전 모델을 내려받습니다. 모델 다운로드에는 인터넷이 필요합니다. Git Bash에서 `ollama: command not found`가 나오면 Ollama 실행 파일 폴더를 현재 터미널의 `PATH`에 추가하고 설치 여부를 확인합니다.
+
+```bash
+export PATH="$(cygpath -u "$LOCALAPPDATA")/Programs/Ollama:$PATH"
+ollama --version
 ollama pull qwen2.5:3b
 ollama pull qwen2.5vl:3b
 ```
 
-Start local speech transcription, image/object/pose/facial-movement cues, and conversation:
+위 `export`는 현재 Git Bash 창에만 적용됩니다. Windows에 Ollama가 기본 경로가 아닌 곳에 설치되어 있으면 설치 폴더에 맞게 경로를 바꾸세요. PowerShell에서는 보통 `ollama --version`과 `ollama pull 모델이름`을 바로 실행할 수 있습니다.
+
+### 4. 실시간 AI 모드 실행
+
+다음 명령은 노트북 카메라와 기본 마이크를 사용해 영상 분석, 음성 인식, 대화를 시작합니다.
 
 ```bash
-.\.venv314\Scripts\python.exe main.py --live
+./.venv314/Scripts/python.exe main.py --live
 ```
 
-While live mode is running, type a message into the terminal and press Enter for temporary text chat. Replies are also spoken aloud; microphone conversation remains enabled. Type `/text-off` to stop terminal input only. Press Q/Esc in the camera window to stop live mode.
+노트북 내장 마이크 배열(장치 32번)을 사용하려면 다음 명령을 실행합니다.
 
-The first run downloads the Whisper `small` model and MediaPipe task assets into the current user's cache. Ollama downloads its model separately. These downloads require internet once; inference runs locally afterward. Use `--speech-model base` for a smaller/faster but less accurate speech model.
+```bash
+./.venv314/Scripts/python.exe main.py --live --microphone-device 32
+```
 
-Live processing is opt-in. Raw audio and camera frames are not saved. A temporary JPEG thumbnail (maximum 448 pixels on its longest side) of the current frame is sent over loopback to the local vision model when a visual question is asked by voice or text; older images are not retained in chat history. Regular conversation uses a local Qwen2.5 3B text model with concise Korean conversational instructions, and proactive prompts use detected text cues. No hosted AI API is used, and the runtime rejects non-loopback Ollama addresses. Model weights are downloaded from configured public repositories on first use; after setup, inference runs locally. Visual answers can be slow on CPU-only systems. Transcripts and movement cues are sent only to the local Ollama service. Windows' installed Korean text-to-speech voice provides offline speech output. Proactive prompts are rate-limited to at least one minute apart and may be skipped if there is nothing useful to say. Headphones help avoid speaker echo and improve interruption detection. Facial output describes visible movement only, not emotion, intent, identity, or personality. Real-time object labels still come from the general-purpose COCO detector and may miss or mislabel objects. Stable boxes are shown only after repeated detection; low-confidence or unsupported results are not presented as confirmed object labels. Asking about the view by voice or text uses the separate local vision-language model.
+실행 중에는 터미널에 글을 입력하고 `Enter`를 눌러 대화할 수도 있습니다. 답변은 소리로도 출력됩니다. `/text-off`를 입력하면 터미널 입력만 중지되고 마이크 대화는 계속됩니다. 종료하려면 카메라 창에서 `Q` 또는 `Esc`를 누릅니다.
 
-Python 3.14 is recommended for the optional local inference stack. The original Python 3.15 environment may not have compatible wheels for all inference packages.
+명령이 실패하면 먼저 Ollama가 실행 중인지, 모델 다운로드가 끝났는지, Windows 설정에서 카메라·마이크 사용 권한이 허용되어 있는지 확인하세요. 다른 마이크를 쓰려면 `--devices` 명령으로 표시된 번호를 `--microphone-device 번호`에 넣습니다.
+
+첫 AI 실행 때 Whisper 음성 인식 모델과 MediaPipe 영상 분석 파일이 사용자 캐시에 다운로드됩니다. 다운로드 후 추론은 로컬에서 실행됩니다. 더 작고 빠르지만 인식 정확도가 낮은 음성 모델을 사용하려면 명령 끝에 `--speech-model base`를 추가합니다.
+
+실시간 모드는 사용자가 직접 실행해야 합니다. 원본 오디오와 카메라 프레임은 파일로 저장하지 않습니다. 화면에 대해 음성이나 글로 질문하면 현재 프레임의 임시 축소 이미지가 내 컴퓨터의 Ollama에 전달됩니다. 대화에는 호스팅된 외부 AI API를 사용하지 않습니다. CPU만 있는 컴퓨터에서는 화면 질문 답변이 느릴 수 있습니다. Windows에 한국어 음성 출력이 설치되어 있어야 답변을 소리로 들을 수 있습니다.
+
+얼굴 분석 결과는 화면에서 관찰된 움직임 단서일 뿐 감정·의도·신원·성격을 판정하지 않습니다. 사물 인식은 일반 사물 데이터셋에 기반하므로 사물을 놓치거나 잘못 표시할 수 있습니다. 헤드폰을 사용하면 스피커 소리가 마이크에 다시 들어가는 현상을 줄일 수 있습니다.
+
+선택적 AI 패키지 호환성을 위해 Python 3.14 사용을 권장합니다. Python 3.15에서는 일부 패키지가 설치되지 않을 수 있습니다.

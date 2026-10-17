@@ -42,6 +42,7 @@ class AudioInputBuffer:
         with self._lock:
             self._sequence_number += 1
             sequence_number = self._sequence_number
+        self._record("audio.frame_received", frame_count)
         input_overflow = self.record_input_status(status, frame_count)
         try:
             self._queue.put_nowait(
@@ -74,12 +75,28 @@ class AudioInputBuffer:
             raise ValueError("Discard reason must not be empty.")
         with self._lock:
             self._sequence_number += 1
+        self._record("audio.frame_received", frame_count)
         self.record_input_status(status, frame_count)
-        self._record(f"audio.segment_rejected:{reason}", frame_count)
+        self._record(f"audio.segment_rejected:{reason}", 1)
+
+    def record_sequence_gap(self, missing_chunks: int) -> None:
+        if (
+            isinstance(missing_chunks, bool)
+            or not isinstance(missing_chunks, int)
+            or missing_chunks <= 0
+        ):
+            raise ValueError("missing_chunks must be a positive integer.")
+        self._record("audio.sequence_gap", missing_chunks)
+
+    def record_segment_started(self) -> None:
+        self._record("audio.segment_started", 1)
 
     def record_segment(self, *, accepted: bool, reason: str = "unknown") -> None:
         key = "audio.segment_accepted" if accepted else f"audio.segment_rejected:{reason}"
         self._record(key, 1)
+
+    def record_segment_ended(self) -> None:
+        self._record("audio.segment_ended", 1)
 
     def get(self, timeout: float | None = None) -> AudioFrame:
         return self._queue.get(timeout=timeout)

@@ -1,8 +1,24 @@
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
-from .contracts import BackendHealth, BackendInfo, BackendKind, BackendStatus
+from .contracts import (
+    BackendHealth,
+    BackendInfo,
+    BackendKind,
+    BackendStatus,
+    MetadataStatus,
+)
+
+
+def _installed_library_version(distribution_name: str | None) -> str | None:
+    if distribution_name is None:
+        return None
+    try:
+        return version(distribution_name)
+    except PackageNotFoundError:
+        return None
 
 
 class ExternalBackendAdapter:
@@ -18,6 +34,7 @@ class ExternalBackendAdapter:
         execution_device: str,
         external_program: bool,
         network_required: bool,
+        library_distribution: str | None = None,
         loopback_only: bool = False,
         known_limitations: tuple[str, ...] = (),
     ) -> None:
@@ -35,6 +52,12 @@ class ExternalBackendAdapter:
             model_source=checkpoint_source,
             loopback_only=loopback_only,
             known_limitations=known_limitations,
+            library_version=_installed_library_version(library_distribution),
+            license_identifier=None,
+            license_status=MetadataStatus.NOT_REVIEWED,
+            provenance_status=MetadataStatus.NOT_REVIEWED,
+            approval_status=MetadataStatus.NOT_REVIEWED,
+            verified_at=None,
         )
         self._status = BackendStatus.UNAVAILABLE
         self._detail = "Not initialized."
@@ -68,6 +91,7 @@ class ExternalWhisperBackend(ExternalBackendAdapter):
             execution_device="cpu/int8",
             external_program=False,
             network_required=True,
+            library_distribution="faster-whisper",
         )
         self._model_size = model_size
         self._delegate: Any | None = None
@@ -107,6 +131,7 @@ class ExternalMediaPipeBackend(ExternalBackendAdapter):
             execution_device="cpu",
             external_program=False,
             network_required=True,
+            library_distribution="mediapipe",
         )
         self._box_clamp_tolerance_pixels = box_clamp_tolerance_pixels
         self._delegate: Any | None = None
@@ -186,6 +211,7 @@ class ExternalSapiSpeechBackend(ExternalBackendAdapter):
             execution_device="local Windows audio output",
             external_program=False,
             network_required=False,
+            library_distribution="pyttsx3",
         )
         self._delegate: Any | None = None
 

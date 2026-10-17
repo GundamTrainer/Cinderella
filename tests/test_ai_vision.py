@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ai.contracts import BackendKind
+from ai.contracts import BackendKind, MetadataStatus
 from ai.evaluation import (
     DetectionBenchmarkSample,
     evaluate_detection_benchmark,
@@ -16,6 +16,7 @@ from ai.external_backends import (
     ExternalOllamaLanguageBackend,
     ExternalSapiSpeechBackend,
     ExternalWhisperBackend,
+    _installed_library_version,
 )
 from ai.observation import (
     Observation,
@@ -48,8 +49,9 @@ from datasets.object_detection.schema import (
     example_synthetic_metadata,
     validate_dataset_manifest,
 )
-from runtime.ai_pipeline import LocalVisionAnalyzer
+from runtime.ai_pipeline import LocalVisionAnalyzer, _audio_diagnostic_event
 from runtime.audio_stream import AudioInputBuffer
+from runtime.event_bus import EventType
 
 
 def test_detection_stabilizer_only_promotes_repeated_confident_boxes() -> None:
@@ -370,6 +372,7 @@ def test_audio_input_buffer_is_bounded_and_marks_device_overflow() -> None:
     assert not first.input_overflow
     assert second.input_overflow
     assert buffer.drain_diagnostics() == {
+        "audio.frame_received": 6,
         "audio.frame_dropped": 2,
         "audio.input_overflow": 2,
         "audio.queue_pressure": 2,
@@ -385,9 +388,40 @@ def test_audio_discard_advances_sequence_to_break_segments() -> None:
     assert buffer.get_nowait().sequence_number == 1
     assert buffer.get_nowait().sequence_number == 3
     assert buffer.drain_diagnostics() == {
-        "audio.segment_rejected:tts_echo_guard": 2,
+        "audio.frame_received": 6,
+        "audio.segment_rejected:tts_echo_guard": 1,
         "audio.queue_pressure": 2,
     }
+
+
+def test_audio_buffer_records_sequence_and_segment_boundaries_without_media() -> None:
+    buffer = AudioInputBuffer(capacity=2)
+    buffer.record_sequence_gap(2)
+    buffer.record_segment_started()
+    buffer.record_segment(accepted=False, reason="queue_gap")
+    buffer.record_segment_ended()
+
+    assert buffer.drain_diagnostics() == {
+        "audio.sequence_gap": 2,
+        "audio.segment_started": 1,
+        "audio.segment_rejected:queue_gap": 1,
+        "audio.segment_ended": 1,
+    }
+
+
+def test_audio_diagnostic_event_has_aggregate_only_payload() -> None:
+    event = _audio_diagnostic_event("audio.segment_rejected:queue_gap", 2)
+
+    assert event.event_type == EventType.AUDIO_SEGMENT_REJECTED
+    assert event.payload == {
+        "count": 2,
+        "reason": "queue_gap",
+        "raw_audio_logged": False,
+    }
+    with pytest.raises(ValueError, match="positive integer"):
+        _audio_diagnostic_event("audio.segment_started", 0)
+    with pytest.raises(ValueError, match="Unsupported audio diagnostic"):
+        _audio_diagnostic_event("audio.unrecognized", 1)
 
 
 def test_world_state_tracks_stable_motion_and_expires_missing_objects() -> None:
@@ -685,8 +719,25 @@ def test_external_backend_metadata_identifies_provenance_and_pretrained_weights(
     ]
     assert backends[0].backend_info.backend_id == "faster-whisper"
     assert backends[0].backend_info.model_source == "Systran/faster-whisper"
+    assert backends[0].backend_info.library_version is None or isinstance(
+        backends[0].backend_info.library_version, str
+    )
+    assert all(
+        backend.backend_info.license_status == MetadataStatus.NOT_REVIEWED
+        and backend.backend_info.provenance_status == MetadataStatus.NOT_REVIEWED
+        and backend.backend_info.approval_status == MetadataStatus.NOT_REVIEWED
+        and backend.backend_info.verified_at is None
+        for backend in backends
+    )
     assert backends[2].backend_info.loopback_only is True
     assert backends[2].backend_info.known_limitations
+
+
+def test_backend_metadata_reports_installed_library_version(monkeypatch) -> None:
+    monkeypatch.setattr("ai.external_backends.version", lambda _: "1.2.3")
+
+    assert _installed_library_version("faster-whisper") == "1.2.3"
+    assert _installed_library_version(None) is None
 
 
 def test_whisper_adapter_exposes_transcription_rejection_reason() -> None:

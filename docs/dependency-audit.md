@@ -18,7 +18,12 @@ First-run downloads are initiated for model assets as documented in the README. 
 
 `ai/contracts.py`, `ai/vision.py`, `ai/evaluation.py`, and `datasets/object_detection/schema.py` are repository code. They define backend contracts, detection/feature validation and stabilization, a basic evaluator, and annotation-manifest validation. They are not trained recognition models and do not replace the external model weights.
 
-The adapters currently provide provenance metadata and delegate calls, but the concrete model implementations and their direct third-party imports remain in `runtime/ai_pipeline.py`. The implementation boundary is therefore partial, not a complete separation of integrations from orchestration.
+The adapters provide provenance metadata and delegate calls, but the concrete model
+implementations and their direct third-party imports remain in `runtime/ai_pipeline.py`. The
+implementation boundary is therefore partial, not a complete separation of integrations from
+orchestration. Backend metadata exposes package version when installed and explicit
+not-reviewed states for license, provenance, and approval. A missing version is represented as
+unknown; this change does not claim license verification, checkpoint hashing, or model approval.
 
 ## Package groups
 

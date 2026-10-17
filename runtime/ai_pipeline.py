@@ -51,6 +51,17 @@ VISION_INTERVAL_SECONDS = 0.4
 VISUAL_CHAT_MAX_SIDE = 448
 PROACTIVE_MIN_IDLE_SECONDS = 60
 PROACTIVE_MAX_IDLE_SECONDS = 140
+_AUDIO_DIAGNOSTIC_EVENT_TYPES = {
+    "audio.frame_received": EventType.AUDIO_FRAME_RECEIVED,
+    "audio.frame_dropped": EventType.AUDIO_FRAME_DROPPED,
+    "audio.sequence_gap": EventType.AUDIO_SEQUENCE_GAP,
+    "audio.input_overflow": EventType.AUDIO_INPUT_OVERFLOW,
+    "audio.queue_pressure": EventType.AUDIO_QUEUE_PRESSURE,
+    "audio.segment_started": EventType.AUDIO_SEGMENT_STARTED,
+    "audio.segment_accepted": EventType.AUDIO_SEGMENT_ACCEPTED,
+    "audio.segment_rejected": EventType.AUDIO_SEGMENT_REJECTED,
+    "audio.segment_ended": EventType.AUDIO_SEGMENT_ENDED,
+}
 MODEL_ASSETS = {
     "face_landmarker.task": (
         "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
@@ -1037,6 +1048,24 @@ def _publish_event(event_bus: EventBus, event: Event, timeout: float = 0.25) -> 
         logger.warning("Event bus is full; dropping local inference event %s.", event.event_type)
 
 
+def _audio_diagnostic_event(diagnostic: str, count: int) -> Event:
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ValueError("Audio diagnostic count must be a positive integer.")
+    event_name, separator, reason = diagnostic.partition(":")
+    event_type = _AUDIO_DIAGNOSTIC_EVENT_TYPES.get(event_name)
+    if event_type is None:
+        raise ValueError(f"Unsupported audio diagnostic: {diagnostic}")
+    return Event.create(
+        event_type,
+        "laptop_microphone",
+        payload={
+            "count": count,
+            **({"reason": reason} if separator else {}),
+            "raw_audio_logged": False,
+        },
+    )
+
+
 def run_ai_live(
     *,
     camera_index: int = 0,
@@ -1184,29 +1213,10 @@ def run_ai_live(
     latest_vision_event_at = 0.0
 
     def publish_audio_diagnostics() -> None:
-        event_types = {
-            "audio.frame_dropped": EventType.AUDIO_FRAME_DROPPED,
-            "audio.input_overflow": EventType.AUDIO_INPUT_OVERFLOW,
-            "audio.queue_pressure": EventType.AUDIO_QUEUE_PRESSURE,
-            "audio.segment_accepted": EventType.AUDIO_SEGMENT_ACCEPTED,
-            "audio.segment_rejected": EventType.AUDIO_SEGMENT_REJECTED,
-        }
         for diagnostic, count in audio_chunks.drain_diagnostics().items():
-            event_name, separator, reason = diagnostic.partition(":")
-            event_type = event_types.get(event_name)
-            if event_type is None:
-                raise RuntimeError(f"Unsupported audio diagnostic: {diagnostic}")
             _publish_event(
                 event_bus,
-                Event.create(
-                    event_type,
-                    "laptop_microphone",
-                    payload={
-                        "count": count,
-                        **({"reason": reason} if separator else {}),
-                        "raw_audio_logged": False,
-                    },
-                ),
+                _audio_diagnostic_event(diagnostic, count),
                 timeout=event_publish_timeout,
             )
 
@@ -1229,20 +1239,34 @@ def run_ai_live(
         sample_count = 0
         target_count = sample_rate * SPEECH_WINDOW_SECONDS
         last_sequence_number: int | None = None
+        segment_started = False
         while not stopping.is_set():
             try:
                 chunk = audio_chunks.get(timeout=0.25)
             except queue.Empty:
                 continue
-            if chunk.input_overflow or (
+            sequence_gap = (
+                chunk.sequence_number - last_sequence_number - 1
+                if last_sequence_number is not None
+                else 0
+            )
+            if sequence_gap > 0:
+                audio_chunks.record_sequence_gap(sequence_gap)
+            if chunk.input_overflow or sequence_gap != 0 or (
                 last_sequence_number is not None
                 and chunk.sequence_number != last_sequence_number + 1
             ):
                 if buffered:
                     audio_chunks.record_segment(accepted=False, reason="queue_gap")
+                if segment_started:
+                    audio_chunks.record_segment_ended()
                 buffered = []
                 sample_count = 0
+                segment_started = False
             last_sequence_number = chunk.sequence_number
+            if not segment_started:
+                audio_chunks.record_segment_started()
+                segment_started = True
             buffered.append(chunk.samples)
             sample_count += chunk.frame_count
             if sample_count < target_count:
@@ -1278,6 +1302,11 @@ def run_ai_live(
                 audio_chunks.record_segment(accepted=False, reason="inference_error")
             buffered = []
             sample_count = 0
+            audio_chunks.record_segment_ended()
+            segment_started = False
+        if segment_started:
+            audio_chunks.record_segment(accepted=False, reason="shutdown")
+            audio_chunks.record_segment_ended()
 
     def chat_worker() -> None:
         while not stopping.is_set():

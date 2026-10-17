@@ -25,11 +25,15 @@ Supported event types:
 - audio.speech_started
 - audio.speech_ended
 - audio.sound_detected
+- audio.frame_received
 - audio.frame_dropped
+- audio.sequence_gap
 - audio.input_overflow
 - audio.queue_pressure
+- audio.segment_started
 - audio.segment_accepted
 - audio.segment_rejected
+- audio.segment_ended
 - speech.partial_transcript
 - speech.final_transcript
 - vision.person_detected
@@ -68,7 +72,12 @@ These events are not persisted by the runtime.
 Audio diagnostics are aggregate-only. Their payloads contain a count, an optional reason
 code, and `raw_audio_logged: false`; they never contain PCM samples. Queue drops and device
 overflow are distinguished, and `audio.segment_rejected` can report reasons such as
-`queue_gap`, `tts_echo_guard`, `speech_not_detected`, or `inference_error`.
+`queue_gap`, `tts_echo_guard`, `speech_not_detected`, `inference_error`, or `shutdown`.
+`audio.frame_received`, `audio.frame_dropped`, and `audio.input_overflow` counts refer to
+audio frames in callback chunks; `audio.sequence_gap` counts missing callback chunks.
+`audio.queue_pressure` aggregates observed queue depth, while segment boundary and outcome
+counts are event totals. A shutdown-interrupted segment is rejected rather than silently left
+open.
 
 For `vision.objects_detected`, `payload.objects` contains confirmed labels after temporal
 stabilization. `payload.detections` contains those detections with class ID, label, confidence,

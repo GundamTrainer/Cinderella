@@ -21,6 +21,12 @@ class BackendStatus(StrEnum):
     FAILED = "failed"
 
 
+class MetadataStatus(StrEnum):
+    NOT_REVIEWED = "not_reviewed"
+    VERIFIED = "verified"
+    NOT_APPLICABLE = "not_applicable"
+
+
 @dataclass(frozen=True)
 class BackendInfo:
     name: str
@@ -36,6 +42,12 @@ class BackendInfo:
     model_source: str | None = None
     loopback_only: bool = False
     known_limitations: tuple[str, ...] = ()
+    library_version: str | None = None
+    license_identifier: str | None = None
+    license_status: MetadataStatus = MetadataStatus.NOT_REVIEWED
+    provenance_status: MetadataStatus = MetadataStatus.NOT_REVIEWED
+    approval_status: MetadataStatus = MetadataStatus.NOT_REVIEWED
+    verified_at: str | None = None
 
 
 @dataclass(frozen=True)
